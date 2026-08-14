@@ -1,4 +1,4 @@
--- Tests de ccSave. Chaque cas reproduit une panne qui casse reellement
+-- Tests de ccSave. Chaque cas reproduit une panne qui casse réellement
 -- ccQuarry aujourd'hui.
 
 local H = require("harness")
@@ -7,18 +7,23 @@ local ccSave = require("ccSave")
 
 local PATH = "quarry.save"
 
-H.case("aller-retour, et les booleens restent des booleens", function()
-	mock.install()
+--- Store standard, en version 1 sans migration.
+local function store()
+	return ccSave.store(PATH, { version = 1 })
+end
 
-	local ok = ccSave.write(PATH, {
+H.case("aller-retour, et les booléens restent des booléens", function()
+	mock.install()
+	local s = store()
+
+	H.ok(s.write({
 		curseur = 42,
 		alternate = true,
 		termine = false,
 		nom = "quarry",
-	}, { version = 1 })
-	H.ok(ok, "ecriture")
+	}), "écriture")
 
-	local data = ccSave.read(PATH, { version = 1 })
+	local data = s.read()
 	H.eq(data.curseur, 42, "curseur")
 	H.eq(data.nom, "quarry", "nom")
 	-- L'ancien code sauvegardait tostring(alternate) et relisait == "true".
@@ -30,75 +35,79 @@ end)
 
 H.case("sauvegarde absente : nil et raison, pas de plantage", function()
 	mock.install()
+	local s = store()
 
-	local data, err = ccSave.read(PATH, { version = 1 })
-	H.isNil(data, "donnees")
+	local data, err = s.read()
+	H.isNil(data, "données")
 	H.eq(err, "absent", "raison")
-	H.eq(ccSave.exists(PATH), false, "exists")
+	H.eq(s.exists(), false, "exists")
 end)
 
-H.case("panne en pleine ecriture : l'ancienne sauvegarde survit", function()
+H.case("panne en pleine écriture : l'ancienne sauvegarde survit", function()
 	mock.install()
-	H.ok(ccSave.write(PATH, { etape = 1 }, { version = 1 }), "premiere ecriture")
+	local s = store()
+	H.ok(s.write({ etape = 1 }), "première écriture")
 
-	-- Le turtle est detruit apres 20 octets ecrits dans le temporaire.
+	-- Le turtle est détruit après 20 octets écrits dans le temporaire.
 	mock.failWriteAfter(PATH .. ".tmp", 20)
-	local ok, err = ccSave.write(PATH, { etape = 2 }, { version = 1 })
-	H.eq(ok, false, "ecriture interrompue")
-	H.contains(err, "ecriture", "raison")
+	local ok, err = s.write({ etape = 2 })
+	H.eq(ok, false, "écriture interrompue")
+	H.contains(err, "écriture", "raison")
 
-	-- C'est le point critique : l'ancien code aurait laisse quarry.save tronque,
-	-- et le reboot suivant aurait plante sur savedValues[15].
-	local data = ccSave.read(PATH, { version = 1 })
-	H.eq(data.etape, 1, "l'ecriture ratee n'a pas touche l'original")
+	-- C'est le point critique : l'ancien code aurait laissé quarry.save tronqué,
+	-- et le reboot suivant aurait planté sur savedValues[15].
+	local data = s.read()
+	H.eq(data.etape, 1, "l'écriture ratée n'a pas touché l'original")
 end)
 
-H.case("perte de donnees silencieuse : la relecture de controle la rattrape", function()
+H.case("perte de données silencieuse : la relecture de contrôle la rattrape", function()
 	mock.install()
-	H.ok(ccSave.write(PATH, { etape = 1 }, { version = 1 }), "premiere ecriture")
+	local s = store()
+	H.ok(s.write({ etape = 1 }), "première écriture")
 
-	-- Ici aucune erreur n'est levee : l'ecriture est acquittee, mais le fichier
-	-- est tronque. Sans la relecture de controle, ccSave remplacerait une
+	-- Ici aucune erreur n'est levée : l'écriture est acquittée, mais le fichier
+	-- est tronqué. Sans la relecture de contrôle, ccSave remplacerait une
 	-- sauvegarde valide par un fichier illisible.
 	mock.truncateOnClose(PATH .. ".tmp", 15)
-	local ok, err = ccSave.write(PATH, { etape = 2 }, { version = 1 })
-	H.eq(ok, false, "ecriture refusee")
-	H.contains(err, "verification", "raison")
+	local ok, err = s.write({ etape = 2 })
+	H.eq(ok, false, "écriture refusée")
+	H.contains(err, "vérification", "raison")
 
-	local data = ccSave.read(PATH, { version = 1 })
+	local data = s.read()
 	H.eq(data.etape, 1, "l'original est intact")
-	H.eq(fs.exists(PATH .. ".tmp"), false, "le temporaire douteux est supprime")
+	H.eq(fs.exists(PATH .. ".tmp"), false, "le temporaire douteux est supprimé")
 end)
 
 H.case("fichier corrompu : erreur propre au lieu d'un plantage", function()
 	mock.install()
-	mock.putFile(PATH, "{ version = 1, data = { etape =")   -- tronque
+	mock.putFile(PATH, "{ version = 1, data = { etape =")   -- tronqué
 
-	local data, err = ccSave.read(PATH, { version = 1 })
-	H.isNil(data, "donnees")
+	local data, err = store().read()
+	H.isNil(data, "données")
 	H.eq(err, "corrompu", "raison")
 end)
 
 H.case("panne entre le delete et le move : reprise depuis le temporaire", function()
 	mock.install()
-	H.ok(ccSave.write(PATH, { etape = 7 }, { version = 1 }), "ecriture")
+	local s = store()
+	H.ok(s.write({ etape = 7 }), "écriture")
 
-	-- On rejoue exactement l'etat laisse par une coupure dans cette fenetre :
-	-- le temporaire est complet, le fichier principal a deja ete supprime.
+	-- On rejoue exactement l'état laissé par une coupure dans cette fenêtre :
+	-- le temporaire est complet, le fichier principal a déjà été supprimé.
 	mock.putFile(PATH .. ".tmp", mock.getFile(PATH))
 	fs.delete(PATH)
 
-	local data = ccSave.read(PATH, { version = 1 })
-	H.eq(data.etape, 7, "donnees recuperees")
-	H.ok(fs.exists(PATH), "le fichier principal est restaure")
-	H.eq(fs.exists(PATH .. ".tmp"), false, "le temporaire est consomme")
+	local data = s.read()
+	H.eq(data.etape, 7, "données récupérées")
+	H.ok(fs.exists(PATH), "le fichier principal est restauré")
+	H.eq(fs.exists(PATH .. ".tmp"), false, "le temporaire est consommé")
 end)
 
-H.case("migration du format ccQuarry actuel (indices numeriques)", function()
+H.case("migration du format ccQuarry actuel (indices numériques)", function()
 	mock.install()
 
-	-- Format produit par ccQuarry.lua aujourd'hui : 16 indices numeriques,
-	-- coordonnees en nombres, drapeaux en chaines via tostring().
+	-- Format produit par ccQuarry.lua aujourd'hui : 16 indices numériques,
+	-- coordonnées en nombres, drapeaux en chaînes via tostring().
 	mock.putFile(PATH, textutils.serialize({
 		[1] = 3, [2] = 5, [3] = -12, [4] = 1,
 		[5] = 3, [6] = 5, [7] = -12, [8] = 1,
@@ -107,7 +116,7 @@ H.case("migration du format ccQuarry actuel (indices numeriques)", function()
 		[15] = "false", [16] = "false",
 	}))
 
-	local data, err = ccSave.read(PATH, {
+	local data, err = ccSave.store(PATH, {
 		version = 1,
 		migrations = {
 			[0] = function(old)
@@ -123,7 +132,7 @@ H.case("migration du format ccQuarry actuel (indices numeriques)", function()
 				}
 			end,
 		},
-	})
+	}).read()
 
 	H.isNil(err, "erreur")
 	H.eq(data.cur.x, 3, "cur.x")
@@ -138,27 +147,28 @@ H.case("migration manquante : refus explicite", function()
 	mock.install()
 	mock.putFile(PATH, textutils.serialize({ [1] = 3 }))
 
-	local data, err = ccSave.read(PATH, { version = 1 })
-	H.isNil(data, "donnees")
+	local data, err = store().read()
+	H.isNil(data, "données")
 	H.contains(err, "aucune migration", "raison")
 end)
 
-H.case("sauvegarde plus recente que le script : refus explicite", function()
+H.case("sauvegarde plus récente que le script : refus explicite", function()
 	mock.install()
-	H.ok(ccSave.write(PATH, { etape = 1 }, { version = 4 }), "ecriture v4")
+	H.ok(ccSave.store(PATH, { version = 4 }).write({ etape = 1 }), "écriture v4")
 
-	local data, err = ccSave.read(PATH, { version = 1 })
-	H.isNil(data, "donnees")
+	local data, err = store().read()
+	H.isNil(data, "données")
 	H.contains(err, "version 4", "raison")
 end)
 
 H.case("delete nettoie aussi le temporaire", function()
 	mock.install()
-	H.ok(ccSave.write(PATH, { etape = 1 }, { version = 1 }), "ecriture")
-	mock.putFile(PATH .. ".tmp", "residu")
+	local s = store()
+	H.ok(s.write({ etape = 1 }), "écriture")
+	mock.putFile(PATH .. ".tmp", "résidu")
 
-	ccSave.delete(PATH)
+	s.delete()
 	H.eq(fs.exists(PATH), false, "fichier principal")
 	H.eq(fs.exists(PATH .. ".tmp"), false, "temporaire")
-	H.eq(ccSave.exists(PATH), false, "exists")
+	H.eq(s.exists(), false, "exists")
 end)

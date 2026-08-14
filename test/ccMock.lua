@@ -1,26 +1,26 @@
 -- ccMock : simulateur des APIs ComputerCraft, pour tester hors Minecraft.
 --
--- Ne part JAMAIS en jeu. Il sert a executer les APIs et la logique des scripts
--- sous un interpreteur Lua 5.4 standard, en quelques millisecondes au lieu de
+-- Ne part JAMAIS en jeu. Il sert à exécuter les APIs et la logique des scripts
+-- sous un interpréteur Lua 5.4 standard, en quelques millisecondes au lieu de
 -- 20 minutes de partie.
 --
 -- Conventions du projet (voir README) :
 --   X / Y = plan horizontal, Z = vertical (haut = +Z)
 --   direction : 0 = +X, 1 = +Y, 2 = -X, 3 = -Y
 --
--- Le mock est volontairement PESSIMISTE : il modelise les comportements qui ont
--- reellement casse ccQuarry (gravier qui retombe, bedrock, coffre plein, panne
--- seche, ecriture tronquee) plutot que le cas nominal.
+-- Le mock est volontairement PESSIMISTE : il modélise les comportements qui ont
+-- réellement cassé ccQuarry (gravier qui retombe, bedrock, coffre plein, panne
+-- sèche, écriture tronquée) plutôt que le cas nominal.
 
 local M = {}
 
 -- ---------------------------------------------------------------------------
--- Etat
+-- État
 -- ---------------------------------------------------------------------------
 
 local files, dirs, writeFaults, truncateFaults
-local world, entities
-local t                    -- etat du turtle
+local world, entities, peripherals
+local t                    -- état du turtle
 local clock, events, timers, nextTimer
 local screen
 
@@ -43,7 +43,7 @@ local DELTA = {
 function M.reset(opts)
 	opts = opts or {}
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
-	world, entities = {}, {}
+	world, entities, peripherals = {}, {}, {}
 	clock, events, timers, nextTimer = 0, {}, {}, 1
 	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
 	t = {
@@ -62,7 +62,7 @@ end
 
 local function key(x, y, z) return x .. "," .. y .. "," .. z end
 
---- Definit un bloc. `def` accepte un nom court ou une table complete.
+--- Définit un bloc. `def` accepte un nom court ou une table complète.
 -- Champs : name, unbreakable (bedrock), falling (gravier/sable), inventory (coffre)
 function M.setBlock(x, y, z, def)
 	if def == nil then world[key(x, y, z)] = nil return end
@@ -78,7 +78,7 @@ function M.fill(x1, y1, z1, x2, y2, z2, def)
 	end end end
 end
 
---- Coffre pose dans le monde, avec un nombre de slots fini (=> peut deborder).
+--- Coffre posé dans le monde, avec un nombre de slots fini (=> peut déborder).
 function M.setChest(x, y, z, contents, size)
 	M.setBlock(x, y, z, {
 		name = "minecraft:chest",
@@ -91,7 +91,13 @@ function M.spawnEntity(x, y, z, hp)
 	entities[key(x, y, z)] = { hp = hp or 2 }
 end
 
---- Gravite : apres retrait d'un bloc, ce qui est au-dessus retombe si `falling`.
+--- Branche un périphérique sur un côté. `api` est la table renvoyée par wrap().
+-- L'ordre d'ajout est conservé : peripheral.getNames() le respecte, comme en jeu.
+function M.addPeripheral(side, ptype, api)
+	peripherals[#peripherals + 1] = { side = side, ptype = ptype, api = api or {} }
+end
+
+--- Gravité : après retrait d'un bloc, ce qui est au-dessus retombe si `falling`.
 local function settle(x, y, z)
 	while true do
 		local above = world[key(x, y, z + 1)]
@@ -103,7 +109,7 @@ local function settle(x, y, z)
 end
 
 -- ---------------------------------------------------------------------------
--- Systeme de fichiers
+-- Système de fichiers
 -- ---------------------------------------------------------------------------
 
 local function norm(path)
@@ -111,16 +117,16 @@ local function norm(path)
 	return path
 end
 
---- Injection de panne : coupe l'ecriture de `path` apres `bytes` octets ecrits.
--- Simule un turtle detruit / un chunk decharge en pleine sauvegarde.
+--- Injection de panne : coupe l'écriture de `path` après `bytes` octets écrits.
+-- Simule un turtle détruit / un chunk déchargé en pleine sauvegarde.
 function M.failWriteAfter(path, bytes) writeFaults[norm(path)] = bytes end
 
---- Injection de panne : l'ecriture est acquittee sans erreur, mais le fichier
--- est tronque a `bytes` au moment du close. Simule une perte de donnees
--- silencieuse, le seul cas que la relecture de controle peut rattraper.
+--- Injection de panne : l'écriture est acquittée sans erreur, mais le fichier
+-- est tronqué à `bytes` au moment du close. Simule une perte de données
+-- silencieuse, le seul cas que la relecture de contrôle peut rattraper.
 function M.truncateOnClose(path, bytes) truncateFaults[norm(path)] = bytes end
 
---- Ecrit un contenu arbitraire sans passer par l'API (pour fabriquer un
+--- Écrit un contenu arbitraire sans passer par l'API (pour fabriquer un
 -- fichier corrompu, ou une sauvegarde d'ancienne version).
 function M.putFile(path, content) files[norm(path)] = content end
 function M.getFile(path) return files[norm(path)] end
@@ -187,10 +193,10 @@ function fs.open(path, mode)
 	end
 
 	if mode == "w" or mode == "a" then
-		-- CC tronque le fichier des l'ouverture en "w" : on modelise pareil, et
-		-- on ecrit directement dans le "disque" a chaque write plutot que de
-		-- bufferiser. C'est le modele le plus defavorable, donc le bon pour
-		-- tester la durabilite.
+		-- CC tronque le fichier dès l'ouverture en "w" : on modélise pareil, et
+		-- on écrit directement dans le "disque" à chaque write plutôt que de
+		-- bufferiser. C'est le modèle le plus défavorable, donc le bon pour
+		-- tester la durabilité.
 		if mode == "w" then files[p] = "" elseif files[p] == nil then files[p] = "" end
 		local written, budget = 0, writeFaults[p]
 		local handle
@@ -243,7 +249,7 @@ local function serializeValue(v, indent, seen)
 		elseif type(k) == "string" then strKeys[#strKeys + 1] = k
 		else error("Cannot serialize key of type " .. type(k), 0) end
 	end
-	-- ordre deterministe : indispensable pour comparer des sorties en test
+	-- ordre déterministe : indispensable pour comparer des sorties en test
 	table.sort(intKeys)
 	table.sort(strKeys)
 	for _, k in ipairs(intKeys) do
@@ -280,9 +286,9 @@ local MAX_STACK = 64
 
 local function slotCount(i) local s = t.inv[i] return s and s.count or 0 end
 
---- Range `count` items ; retourne ce qui n'a PAS pu etre range (0 = tout range).
--- `prefer` : slot a remplir en priorite (semantique de turtle.suck, qui remplit
--- le slot selectionne avant de deborder sur les autres).
+--- Range `count` items ; retourne ce qui n'a PAS pu être rangé (0 = tout rangé).
+-- `prefer` : slot à remplir en priorité (sémantique de turtle.suck, qui remplit
+-- le slot sélectionné avant de déborder sur les autres).
 local function store(name, count, prefer)
 	if prefer then
 		local s = t.inv[prefer]
@@ -334,7 +340,7 @@ function M.inventorySummary()
 end
 
 -- ---------------------------------------------------------------------------
--- Turtle : deplacement et minage
+-- Turtle : déplacement et minage
 -- ---------------------------------------------------------------------------
 
 local turtle = {}
@@ -376,7 +382,7 @@ local function digAt(x, y, z)
 	if not b then return false, "Nothing to dig here" end
 	if b.unbreakable then return false, "Unbreakable block detected" end
 	world[key(x, y, z)] = nil
-	store(b.name, 1)                -- ce qui deborde est perdu, comme en jeu
+	store(b.name, 1)                -- ce qui déborde est perdu, comme en jeu
 	settle(x, y, z)
 	return true
 end
@@ -454,7 +460,7 @@ function turtle.getFuelLimit()
 end
 
 --- Contrat critique, sur lequel repose ccFuel :
---- refuel(0) repond "est-ce du combustible ?" SANS rien consommer.
+--- refuel(0) répond "est-ce du combustible ?" SANS rien consommer.
 function turtle.refuel(count)
 	local s = t.inv[t.selected]
 	if not s then return false, "No items to combust" end
@@ -472,7 +478,7 @@ function turtle.refuel(count)
 end
 
 -- ---------------------------------------------------------------------------
--- Turtle : pose, depot, aspiration
+-- Turtle : pose, dépôt, aspiration
 -- ---------------------------------------------------------------------------
 
 local function placeAt(x, y, z)
@@ -495,8 +501,8 @@ function turtle.place() local x, y, z = ahead() return placeAt(x, y, z) end
 function turtle.placeUp() return placeAt(t.x, t.y, t.z + 1) end
 function turtle.placeDown() return placeAt(t.x, t.y, t.z - 1) end
 
---- Depose dans le conteneur vise. Retourne false si plein : c'est le cas qui
---- fait boucler ccQuarry a l'infini aujourd'hui.
+--- Dépose dans le conteneur visé. Retourne false si plein : c'est le cas qui
+--- fait boucler ccQuarry à l'infini aujourd'hui.
 local function dropAt(x, y, z, count)
 	local s = t.inv[t.selected]
 	if not s then return false, "No items to drop" end
@@ -534,8 +540,8 @@ function turtle.drop(n) local x, y, z = ahead() return dropAt(x, y, z, n) end
 function turtle.dropUp(n) return dropAt(t.x, t.y, t.z + 1, n) end
 function turtle.dropDown(n) return dropAt(t.x, t.y, t.z - 1, n) end
 
---- Aspire depuis le PREMIER slot non vide du conteneur : c'est cette semantique
---- qui impose de retenir le rebut au lieu de le rendre immediatement.
+--- Aspire depuis le PREMIER slot non vide du conteneur : c'est cette sémantique
+--- qui impose de retenir le rebut au lieu de le rendre immédiatement.
 local function suckAt(x, y, z, count)
 	local b = world[key(x, y, z)]
 	if not b or not b.inventory then return false, "No inventory to take from" end
@@ -588,7 +594,7 @@ function os_.pullEvent(filter)
 			clock = tm.at
 			if not filter or filter == "timer" then return "timer", tm.id end
 		else
-			error("ccMock: pullEvent sans evenement en attente (deadlock)", 0)
+			error("ccMock : pullEvent sans événement en attente (deadlock)", 0)
 		end
 	end
 end
@@ -629,7 +635,7 @@ term.setTextColor = term.setTextColour
 term.isColor = term.isColour
 function term.current() return term end
 
---- Contenu d'une ligne d'ecran, pour assertion dans les tests d'UI.
+--- Contenu d'une ligne d'écran, pour assertion dans les tests d'UI.
 function M.screenLine(y) return (screen.lines[y] or ""):gsub("%s+$", "") end
 
 local colors = setmetatable({}, { __index = function(_, k)
@@ -645,7 +651,7 @@ end })
 
 M.fs, M.textutils, M.turtle, M.term, M.colors, M.os = fs, textutils, turtle, term, colors, os_
 
---- Injecte les APIs simulees dans les globales, comme en jeu.
+--- Injecte les APIs simulées dans les globales, comme en jeu.
 function M.install()
 	M.reset()
 	_G.fs = fs
@@ -654,7 +660,37 @@ function M.install()
 	_G.term = term
 	_G.colors = colors
 	_G.colours = colors
-	_G.peripheral = { find = function() return nil end, getNames = function() return {} end }
+	_G.peripheral = {
+		getNames = function()
+			local out = {}
+			for _, p in ipairs(peripherals) do out[#out + 1] = p.side end
+			return out
+		end,
+		getType = function(side)
+			for _, p in ipairs(peripherals) do
+				if p.side == side then return p.ptype end
+			end
+			return nil
+		end,
+		isPresent = function(side)
+			for _, p in ipairs(peripherals) do
+				if p.side == side then return true end
+			end
+			return false
+		end,
+		wrap = function(side)
+			for _, p in ipairs(peripherals) do
+				if p.side == side then return p.api end
+			end
+			return nil
+		end,
+		find = function(ptype)
+			for _, p in ipairs(peripherals) do
+				if p.ptype == ptype then return p.api, p.side end
+			end
+			return nil
+		end,
+	}
 	_G.sleep = os_.sleep
 	for k, v in pairs(os_) do _G.os[k] = v end
 	return M

@@ -1,4 +1,4 @@
--- Harnais de test minimal. Aucune dependance : Lua 5.4 standard suffit.
+-- Harnais de test minimal. Aucune dépendance : Lua 5.4 standard suffit.
 
 local H = { cases = {} }
 
@@ -48,12 +48,12 @@ function H.run()
 			print("  ok      " .. c.name)
 		else
 			failed = failed + 1
-			print("  ECHEC   " .. c.name)
+			print("  ÉCHEC   " .. c.name)
 			print("          " .. tostring(err))
 		end
 	end
 	print()
-	print(string.format("%d reussis, %d echecs, %d au total", passed, failed, #H.cases))
+	print(string.format("%d réussis, %d échecs, %d au total", passed, failed, #H.cases))
 	return failed == 0
 end
 
