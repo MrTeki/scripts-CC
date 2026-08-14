@@ -19,7 +19,7 @@ local M = {}
 -- ---------------------------------------------------------------------------
 
 local files, dirs, writeFaults, truncateFaults
-local world, entities, peripherals, gpsOrigin
+local world, entities, peripherals, gpsOrigin, ground
 local t                    -- état du turtle
 local clock, events, timers, nextTimer
 local screen
@@ -43,7 +43,7 @@ local DELTA = {
 function M.reset(opts)
 	opts = opts or {}
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
-	world, entities, peripherals, gpsOrigin = {}, {}, {}, nil
+	world, entities, peripherals, gpsOrigin, ground = {}, {}, {}, nil, {}
 	clock, events, timers, nextTimer = 0, {}, {}, 1
 	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
 	t = {
@@ -338,6 +338,18 @@ end
 
 function M.getTurtle() return t end
 
+--- Objets tombés au sol, dans l'ordre de dépôt.
+function M.groundItems() return ground end
+
+--- Nombre total d'objets d'un nom donné tombés au sol.
+function M.groundCount(name)
+	local n = 0
+	for _, item in ipairs(ground) do
+		if item.name == name then n = n + item.count end
+	end
+	return n
+end
+
 function M.inventorySummary()
 	local out = {}
 	for i = 1, 16 do
@@ -512,13 +524,22 @@ function turtle.place() local x, y, z = ahead() return placeAt(x, y, z) end
 function turtle.placeUp() return placeAt(t.x, t.y, t.z + 1) end
 function turtle.placeDown() return placeAt(t.x, t.y, t.z - 1) end
 
---- Dépose dans le conteneur visé. Retourne false si plein : c'est le cas qui
+--- Dépose dans le conteneur visé. Retourne false si PLEIN : c'est le cas qui
 --- fait boucler ccQuarry à l'infini aujourd'hui.
+--- Sans conteneur en face, l'objet tombe au sol et l'appel réussit, comme en
+--- jeu. C'est ce sur quoi repose la mise au rebut.
 local function dropAt(x, y, z, count)
 	local s = t.inv[t.selected]
 	if not s then return false, "No items to drop" end
+
 	local b = world[key(x, y, z)]
-	if not b or not b.inventory then return false, "No inventory to drop to" end
+	if not b or not b.inventory then
+		local n = math.min(count or s.count, s.count)
+		ground[#ground + 1] = { name = s.name, count = n }
+		s.count = s.count - n
+		if s.count == 0 then t.inv[t.selected] = nil end
+		return true
+	end
 
 	local n = math.min(count or s.count, s.count)
 	local inv, size = b.inventory, b.size

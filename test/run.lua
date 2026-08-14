@@ -16,6 +16,8 @@ local MODULES = {
 	"test_ccUtil",
 	"test_ccVec",
 	"test_ccNav",
+	"test_ccInv",
+	"test_ccFuel",
 	"test_ccSave",
 }
 
