@@ -63,7 +63,8 @@ end
 local function key(x, y, z) return x .. "," .. y .. "," .. z end
 
 --- Définit un bloc. `def` accepte un nom court ou une table complète.
--- Champs : name, unbreakable (bedrock), falling (gravier/sable), inventory (coffre)
+-- Champs : name, unbreakable (bedrock), falling (gravier/sable),
+--          regenerates (générateur de cobble), inventory (coffre)
 function M.setBlock(x, y, z, def)
 	if def == nil then world[key(x, y, z)] = nil return end
 	if type(def) == "string" then def = { name = def } end
@@ -391,6 +392,9 @@ local function digAt(x, y, z)
 	world[key(x, y, z)] = nil
 	store(b.name, 1)                -- ce qui déborde est perdu, comme en jeu
 	settle(x, y, z)
+	-- Bloc qui repousse aussitôt : générateur de cobble, sources infinies de
+	-- certains mods. Les dig réussissent alors indéfiniment.
+	if b.regenerates and not world[key(x, y, z)] then world[key(x, y, z)] = b end
 	return true
 end
 

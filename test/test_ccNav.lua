@@ -69,16 +69,55 @@ H.case("gravier qui retombe : la séquence entière est retentée", function()
 	H.eq(ccNav.stats().dug, 3, "trois blocs creusés")
 end)
 
-H.case("gravier : budget insuffisant, échec net plutôt que boucle", function()
+H.case("colonne de gravier de hauteur maximale : la turtle en vient à bout", function()
+	-- 384 = hauteur du monde depuis la 1.18 (Y de -64 à 319), donc la plus
+	-- haute colonne que le moteur autorise. Avec l'ancien compteur unique à 8
+	-- tentatives, la turtle butait dès 8 blocs.
+	fresh()
+	for z = 0, 383 do
+		mock.setBlock(1, 0, z, { name = "minecraft:sand", falling = true })
+	end
+
+	H.ok(ccNav.forward(), "traversée avec les réglages par défaut")
+	H.eq(ccNav.position().x, 1, "x")
+	H.eq(ccNav.stats().dug, 384, "384 blocs creusés")
+end)
+
+H.case("maxDig borne les blocs qui repoussent", function()
+	-- Générateur de cobble : chaque dig réussit, indéfiniment. Sans plafond
+	-- absolu, la boucle ne rendrait jamais la main, puisque creuser compte
+	-- comme un progrès.
+	fresh()
+	mock.setBlock(1, 0, 0, { name = "minecraft:cobblestone", regenerates = true })
+
+	local ok, reason = ccNav.forward({ maxDig = 20 })
+	H.eq(ok, false, "échec")
+	H.eq(reason, "blocked", "raison")
+	H.eq(ccNav.stats().dug, 20, "arrêt au plafond")
+end)
+
+H.case("gravier : plafond insuffisant, échec net plutôt que boucle", function()
 	fresh()
 	mock.setBlock(1, 0, 0, { name = "minecraft:gravel", falling = true })
 	mock.setBlock(1, 0, 1, { name = "minecraft:gravel", falling = true })
 	mock.setBlock(1, 0, 2, { name = "minecraft:gravel", falling = true })
 
-	local ok, reason = ccNav.forward({ tries = 3 })
+	local ok, reason = ccNav.forward({ maxDig = 2 })
 	H.eq(ok, false, "échec")
 	H.eq(reason, "blocked", "raison")
 	H.eq(ccNav.position().x, 0, "position inchangée")
+end)
+
+H.case("un dig réussi ne consomme pas le budget d'essais stériles", function()
+	-- La séparation des deux compteurs : 5 blocs de gravier passent alors que
+	-- le budget d'essais stériles n'est que de 2.
+	fresh()
+	for z = 0, 4 do
+		mock.setBlock(1, 0, z, { name = "minecraft:gravel", falling = true })
+	end
+
+	H.ok(ccNav.forward({ tries = 2 }), "traversée")
+	H.eq(ccNav.stats().dug, 5, "cinq blocs creusés")
 end)
 
 H.case("bedrock : unbreakable, avec le nom du bloc", function()
@@ -320,16 +359,42 @@ H.case("gpsHeading retrouve le cap dans les 4 directions", function()
 		H.eq(found, dir, "cap depuis " .. dir)
 		H.eq(mock.getTurtle().x, 0, "revenu en x")
 		H.eq(mock.getTurtle().y, 0, "revenu en y")
+		H.eq(mock.getTurtle().dir, dir, "orientation restaurée")
 	end
 end)
 
-H.case("gpsHeading utilise le recul quand l'avant est bloqué", function()
+H.case("gpsHeading pivote vers une case libre sans rien casser", function()
+	-- Le turtle est dans un couloir : bloqué devant et derrière, libre sur les
+	-- côtés. C'est la situation normale au fond d'une carrière.
 	fresh()
 	mock.setGps(0, 0, 0)
-	mock.setBlock(1, 0, 0, { name = "minecraft:bedrock", unbreakable = true })
+	mock.getTurtle().dir = 0
+	mock.setBlock(1, 0, 0, "minecraft:stone")     -- devant
+	mock.setBlock(-1, 0, 0, "minecraft:stone")    -- derrière
 
 	H.eq(ccNav.gpsHeading(), 0, "cap")
-	H.eq(mock.getTurtle().x, 0, "revenu à sa place")
+	H.eq(mock.getTurtle().x, 0, "revenu en x")
+	H.eq(mock.getTurtle().y, 0, "revenu en y")
+	H.eq(mock.getTurtle().dir, 0, "orientation restaurée")
+	H.ok(mock.getBlock(1, 0, 0), "le bloc devant est intact")
+	H.ok(mock.getBlock(-1, 0, 0), "le bloc derrière est intact")
+	H.eq(ccNav.stats().dug, 0, "aucun bloc creusé")
+end)
+
+H.case("gpsHeading refuse de creuser sans autorisation explicite", function()
+	fresh()
+	mock.setGps(0, 0, 0)
+	for _, p in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+		mock.setBlock(p[1], p[2], 0, "minecraft:stone")
+	end
+
+	local dir, reason = ccNav.gpsHeading()
+	H.isNil(dir, "aucun cap")
+	H.contains(reason, "aucune case libre", "raison")
+	H.eq(mock.getTurtle().dir, 0, "orientation restaurée")
+
+	-- Avec l'autorisation, elle creuse et se repère.
+	H.eq(ccNav.gpsHeading({ dig = true }), 0, "cap avec dig autorisé")
 end)
 
 H.case("calibrate recale la position suivie sur le GPS", function()

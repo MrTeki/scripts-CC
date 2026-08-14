@@ -47,8 +47,24 @@ local OPS = {
 	down    = { move = "down",    detect = "detectDown", dig = "digDown", attack = "attackDown", inspect = "inspectDown" },
 }
 
+-- Hauteur maximale du monde : 384 depuis la 1.18 (Y de -64 à 319), 256 avant.
+-- C'est la plus haute colonne de gravier ou de sable que le moteur autorise,
+-- donc le plafond utile pour un seul mouvement.
+local WORLD_HEIGHT = 384
+
 local DEFAULTS = {
-	tries = 8,        -- tentatives par mouvement
+	-- Tentatives STÉRILES consécutives : attaques qui ne tuent pas, échecs
+	-- inexpliqués. Un dig réussi remet ce compteur à zéro, puisqu'il constitue
+	-- un progrès. Ce budget-là n'a donc pas à couvrir la hauteur d'une colonne.
+	tries = 8,
+
+	-- Plafond ABSOLU de blocs creusés pour un seul mouvement. Dimensionné sur
+	-- la hauteur du monde : une colonne de gravier ou de sable, si haute
+	-- soit-elle, passe. Sert de garde-fou contre les blocs qui repoussent
+	-- (générateur de cobble, sources infinies de certains mods), où les dig
+	-- réussiraient indéfiniment.
+	maxDig = WORLD_HEIGHT,
+
 	dig = true,       -- creuser les obstacles
 	attack = true,    -- attaquer ce qui bloque sans être un bloc
 	order = "zxy",    -- ordre des axes dans goTo
@@ -145,13 +161,16 @@ M.fuelLevel = fuelLevel
 function M.dig(where, o)
 	o = opts(o)
 	local op = assert(OPS[where], "direction inconnue: " .. tostring(where))
+	local dug = 0
 
-	for _ = 1, o.tries do
+	-- Creuser est purement productif : seul le plafond absolu borne la boucle.
+	while dug < o.maxDig do
 		if not turtle[op.detect]() then return true end
 		if not turtle[op.dig]() then
 			return false, "unbreakable", blockName(op)
 		end
 		stats.dug = stats.dug + 1
+		dug = dug + 1
 	end
 
 	if turtle[op.detect]() then
@@ -169,9 +188,13 @@ end
 local function step(where, o)
 	o = opts(o)
 	local op = OPS[where]
+	local idle, dug = 0, 0
 	local lastReason, lastDetail = "blocked", nil
 
-	for _ = 1, o.tries do
+	-- maxDig borne le CREUSEMENT, pas la boucle : sinon le dernier bloc d'une
+	-- colonne de hauteur maximale serait dégagé sans que le mouvement soit
+	-- retenté, et le mouvement échouerait juste après avoir réussi son travail.
+	while idle < o.tries do
 		-- Vérifié en PREMIER : sans carburant, le mouvement échoue et rien
 		-- n'est détecté devant. C'est ce qui envoyait ccQuarry attaquer le vide
 		-- indéfiniment.
@@ -187,16 +210,27 @@ local function step(where, o)
 			if not o.dig then
 				return false, "blocked", blockName(op)
 			end
+			if dug >= o.maxDig then
+				return false, "blocked", blockName(op)
+			end
 			if not turtle[op.dig]() then
 				return false, "unbreakable", blockName(op)
 			end
+			-- Un dig réussi est un progrès : le compteur d'essais stériles
+			-- repart de zéro. Une colonne de gravier n'est donc bornée que par
+			-- maxDig, jamais par tries.
 			stats.dug = stats.dug + 1
+			dug = dug + 1
+			idle = 0
 			lastReason, lastDetail = "blocked", nil
 		else
 			-- Rien devant mais le mouvement échoue : une entité occupe la case.
+			-- Elle ne compte pas comme un progrès : un flux continu de mobs
+			-- (spawner) doit finir par rendre la main.
 			if not o.attack then return false, "entity" end
 			turtle[op.attack]()
 			stats.attacks = stats.attacks + 1
+			idle = idle + 1
 			lastReason, lastDetail = "entity", nil
 		end
 	end
@@ -320,32 +354,82 @@ function M.gpsPosition(timeout)
 	return { x = wx, y = wz, z = wy }
 end
 
---- Détermine le cap réel, en faisant un aller-retour d'un bloc.
--- Coûte 2 unités de carburant et exige une case libre devant ou derrière.
+--- Détermine le cap réel. Le GPS donne une position, jamais une orientation :
+-- il faut donc bouger d'un bloc et comparer.
+--
+-- Le sondage vise une case adjacente DÉJÀ LIBRE, trouvée en pivotant sur place.
+-- Trois raisons :
+--
+--   * Aucun bloc n'est cassé. Le repérage ne dégrade pas le terrain, en
+--     particulier hors de l'emprise du chantier.
+--   * Dans une carrière, le turtle se trouve dans le couloir qu'il vient de
+--     creuser : une case libre existe toujours, et elle est à l'intérieur du
+--     volume travaillé, donc dans un chunk qui était actif il y a un instant.
+--     Un turtle dans un chunk déchargé ne tourne pas du tout ; le vrai risque
+--     est de franchir une frontière vers un chunk inactif, et sonder une case
+--     déjà creusée l'évite.
+--   * Deux fois moins de carburant qu'un aller-retour à l'aveugle raté.
+--
 -- N'utilise pas les primitives de ce module et ne touche pas à la position
--- suivie : le cap est justement ce qu'on ne connaît pas encore.
+-- suivie : le cap est justement ce qu'on ne connaît pas encore. Le turtle est
+-- remis dans son orientation et sa case d'origine.
+--
+-- @param o  { timeout, dig = false }  dig autorise à creuser si aucune case
+--           adjacente n'est libre. À n'activer que si l'appelant sait que le
+--           turtle est dans l'emprise du chantier.
 -- @return dir, ou nil + raison
-function M.gpsHeading(timeout)
-	local before = M.gpsPosition(timeout)
+function M.gpsHeading(o)
+	o = o or {}
+	local before = M.gpsPosition(o.timeout)
 	if not before then return nil, "gps indisponible" end
 
-	local sign = 1
-	if not turtle.forward() then
-		if not turtle.back() then return nil, "aucune case libre pour se repérer" end
-		sign = -1
+	-- Recherche d'une case libre, un quart de tour à la fois.
+	local turns = 0
+	while turns < 4 and turtle.detect() do
+		turtle.turnRight()
+		turns = turns + 1
 	end
 
-	local after = M.gpsPosition(timeout)
-	if sign == 1 then turtle.back() else turtle.forward() end
+	if turns == 4 then
+		-- Quatre quarts de tour : on est revenu à l'orientation de départ et
+		-- rien n'est libre.
+		if not o.dig then return nil, "aucune case libre pour se repérer" end
+		if not turtle.dig() then return nil, "aucune case libre pour se repérer" end
+		turns = 0
+	end
+
+	local function restore()
+		for _ = 1, turns do turtle.turnLeft() end
+	end
+
+	if not turtle.forward() then
+		restore()
+		return nil, "déplacement impossible"
+	end
+
+	local after = M.gpsPosition(o.timeout)
+
+	-- Retour sur la case d'origine. Si le recul échoue (quelque chose s'est
+	-- glissé derrière), demi-tour, un pas, demi-tour.
+	if not turtle.back() then
+		turtle.turnRight() turtle.turnRight()
+		turtle.forward()
+		turtle.turnRight() turtle.turnRight()
+	end
+	restore()
+
 	if not after then return nil, "gps indisponible après déplacement" end
 
-	local dx = (after.x - before.x) * sign
-	local dy = (after.y - before.y) * sign
-	if dx == 1 then return 0 end
-	if dy == 1 then return 1 end
-	if dx == -1 then return 2 end
-	if dy == -1 then return 3 end
-	return nil, "déplacement non concluant"
+	local dx, dy = after.x - before.x, after.y - before.y
+	local measured
+	if dx == 1 then measured = 0
+	elseif dy == 1 then measured = 1
+	elseif dx == -1 then measured = 2
+	elseif dy == -1 then measured = 3
+	else return nil, "déplacement non concluant" end
+
+	-- Le cap mesuré est celui d'APRÈS les `turns` quarts de tour à droite.
+	return (measured - turns) % 4
 end
 
 --- Recale la position suivie sur le GPS, en coordonnées locales au chantier.
