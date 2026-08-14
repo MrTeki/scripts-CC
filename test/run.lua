@@ -14,6 +14,7 @@ package.path = table.concat({
 -- Ajouter ici chaque nouveau fichier de test.
 local MODULES = {
 	"test_ccUtil",
+	"test_ccPlan",
 	"test_ccVec",
 	"test_ccNav",
 	"test_ccInv",
@@ -22,6 +23,7 @@ local MODULES = {
 	"test_ccUi",
 	"test_ccNet",
 	"test_integration",
+	"test_ccQuarry",
 }
 
 local H = require("harness")

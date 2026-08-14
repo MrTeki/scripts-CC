@@ -141,13 +141,13 @@ function M.clearQueue() state.queue = {} end
 -- Réception
 -- ---------------------------------------------------------------------------
 
---- Traite au plus UN message en attente, puis rend la main.
--- @return nom de la commande reçue, ou nil si rien n'est arrivé
-function M.poll()
+--- Traite un message DÉJÀ reçu, tel que le livre l'événement rednet_message.
+-- Indispensable quand l'appelant a sa propre boucle d'événements : une fois
+-- l'événement consommé par os.pullEvent, rednet.receive ne le reverra jamais.
+-- @return nom de la commande, ou nil si le message ne nous concerne pas
+function M.handleMessage(id, message, protocol)
 	if not state.side then return nil end
-
-	local id, message = rednet.receive(state.protocol)
-	if not id then return nil end
+	if protocol ~= nil and protocol ~= state.protocol then return nil end
 
 	local data, name
 
@@ -181,6 +181,17 @@ function M.poll()
 	end
 	rednet.send(id, data, state.protocol)
 	return name
+end
+
+--- Traite au plus UN message en attente, puis rend la main.
+-- Pour les appelants qui n'ont pas leur propre boucle d'événements.
+-- @return nom de la commande reçue, ou nil si rien n'est arrivé
+function M.poll()
+	if not state.side then return nil end
+
+	local id, message, protocol = rednet.receive(state.protocol)
+	if not id then return nil end
+	return M.handleMessage(id, message, protocol)
 end
 
 M.reset()

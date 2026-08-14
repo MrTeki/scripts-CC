@@ -645,6 +645,38 @@ end
 
 os_.pullEventRaw = os_.pullEvent
 
+-- Ordonnanceur coopératif, suffisant pour exécuter un script complet : les
+-- coroutines sont reprises à tour de rôle, et un événement n'est tiré de la
+-- file que lorsqu'elles sont toutes en attente.
+local parallel_ = {}
+
+local function runParallel(waitForAll, ...)
+	local fns = { ... }
+	local cos = {}
+	for i, f in ipairs(fns) do cos[i] = coroutine.create(f) end
+
+	local event = {}
+	while true do
+		local alive = 0
+		for _, co in ipairs(cos) do
+			if coroutine.status(co) == "suspended" then
+				local ok, err = coroutine.resume(co, table.unpack(event))
+				if not ok then error(err, 0) end
+			end
+			if coroutine.status(co) == "dead" then
+				if not waitForAll then return end
+			else
+				alive = alive + 1
+			end
+		end
+		if alive == 0 then return end
+		event = { os_.pullEvent() }
+	end
+end
+
+function parallel_.waitForAny(...) return runParallel(false, ...) end
+function parallel_.waitForAll(...) return runParallel(true, ...) end
+
 local term = {}
 
 local function ensureLine(y) screen.lines[y] = screen.lines[y] or string.rep(" ", screen.w) end
@@ -736,6 +768,7 @@ function M.install()
 		end,
 	}
 	_G.sleep = os_.sleep
+	_G.parallel = parallel_
 	_G.rednet = {
 		open = function(side) rednetState.open = side or true end,
 		close = function() rednetState.open = nil end,

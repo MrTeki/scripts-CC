@@ -61,6 +61,7 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | API | État | Contenu |
 |---|---|---|
 | `ccUtil` | fait | `roundTo`, `clamp`, `indexOf`, `contains`, `copy`, `count`, `findPeripheral(s)` |
+| `ccPlan` | fait | parcours en serpentin d'un volume, en couches ; progression exacte |
 | `ccVec` | fait | position et direction, normalisation `dir % 4`, `turnsBetween` |
 | `ccNav` | fait | mouvement à contrat `ok, raison, bloc`, essais bornés, `goTo`, GPS |
 | `ccSave` | fait | persistance atomique, clés nommées, versionnée + migration |
@@ -69,9 +70,10 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | `ccUi` | fait | journal à ring buffer, `drawBar`, boutons clavier/souris/tactile, moniteur |
 | `ccNet` | fait | sert `ccRemoteProtocol` sans bloquer, commandes mises en file |
 
-Aucune de ces APIs n'est encore consommée par un script : la migration de
-`ccQuarry.lua` et le bootstrap viennent après. `test/test_integration.lua` les
-valide ensemble sur les situations que la carrière rencontrera vraiment.
+`ccQuarry.lua` les consomme toutes. `test/test_integration.lua` les valide
+ensemble, et `test/test_ccQuarry.lua` exécute le script entier sous le mock.
+Le bootstrap réseau reste à faire : pour l'instant les APIs doivent être
+copiées à la main dans `/apis/` sur l'ordinateur.
 
 Deux règles structurantes, valables pour tout script qui les consomme :
 
