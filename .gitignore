@@ -1,0 +1,19 @@
+# État généré en jeu (ne doit jamais être versionné)
+*.save
+*.log
+
+# Sauvegardes locales / fichiers de travail
+*.old
+*.bak
+*.tmp
+*.legacy.lua
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp
+*~
+
+# Windows
+Thumbs.db
+desktop.ini

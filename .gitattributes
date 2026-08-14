@@ -1,0 +1,6 @@
+# Normalisation en LF dans le dépôt : les fichiers sont servis tels quels par
+# raw.githubusercontent.com et téléchargés directement par les turtles.
+* text=auto eol=lf
+
+*.lua text eol=lf
+*.md  text eol=lf
