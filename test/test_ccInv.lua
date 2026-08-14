@@ -43,6 +43,21 @@ H.case("firstFree saute les slots réservés, sauf demande explicite", function(
 	H.eq(ccInv.firstFree(true), 1, "réservés inclus")
 end)
 
+H.case("un slot réservé LAISSÉ VIDE se fait occuper par le butin", function()
+	-- Le jeu ne réserve rien : turtle.dig() range dans le premier slot libre,
+	-- slot 1 compris. La réservation n'est qu'une convention du script, elle
+	-- ne tient que tant que le slot reste occupé.
+	fresh()
+	H.eq(ccInv.count(1), 0, "slot carburant vide au départ")
+
+	mock.setBlock(1, 0, 0, "minecraft:stone")
+	turtle.dig()
+
+	H.eq(ccInv.count(1), 1, "le butin a bien atterri dans le slot réservé")
+	-- Conséquence pratique : ccQuarry doit garder du carburant en slot 1 dès
+	-- le départ, et ccFuel y remettre le reliquat après chaque ravitaillement.
+end)
+
 H.case("isReserved", function()
 	fresh()
 	H.eq(ccInv.isReserved(1), true, "carburant")

@@ -133,6 +133,14 @@ function M.configure(o)
 	for k, v in pairs(o or {}) do config[k] = v end
 end
 
+--- Installe ou retire la garde de mouvement.
+-- Indispensable pour le trajet de retour : la garde de ccFuel raisonne sur la
+-- position courante, donc au moment précis où la réserve est atteinte elle
+-- interdirait aussi les mouvements qui RAPPROCHENT de l'origine. La machine à
+-- états la lève en entrant dans son état de retour.
+-- `configure` ne peut pas servir à cela : pairs() ignore les valeurs nil.
+function M.setGuard(fn) config.canMove = fn end
+
 --- Copie de la position courante.
 function M.position() return ccVec.copy(pos) end
 

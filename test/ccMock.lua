@@ -19,7 +19,7 @@ local M = {}
 -- ---------------------------------------------------------------------------
 
 local files, dirs, writeFaults, truncateFaults
-local world, entities, peripherals, gpsOrigin, ground
+local world, entities, peripherals, gpsOrigin, ground, rednetState
 local t                    -- état du turtle
 local clock, events, timers, nextTimer
 local screen
@@ -44,6 +44,7 @@ function M.reset(opts)
 	opts = opts or {}
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
 	world, entities, peripherals, gpsOrigin, ground = {}, {}, {}, nil, {}
+	rednetState = { open = nil, sent = {}, inbox = {} }
 	clock, events, timers, nextTimer = 0, {}, {}, 1
 	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
 	t = {
@@ -337,6 +338,17 @@ function M.setSlot(i, name, count)
 end
 
 function M.getTurtle() return t end
+
+--- Dépose un message rednet entrant, comme s'il venait d'un autre ordinateur.
+function M.rednetInject(id, message, protocol)
+	rednetState.inbox[#rednetState.inbox + 1] =
+		{ id = id, message = message, protocol = protocol }
+end
+
+--- Messages émis par rednet.send / rednet.broadcast, dans l'ordre.
+function M.rednetSent() return rednetState.sent end
+
+function M.rednetIsOpen() return rednetState.open ~= nil end
 
 --- Objets tombés au sol, dans l'ordre de dépôt.
 function M.groundItems() return ground end
@@ -724,6 +736,30 @@ function M.install()
 		end,
 	}
 	_G.sleep = os_.sleep
+	_G.rednet = {
+		open = function(side) rednetState.open = side or true end,
+		close = function() rednetState.open = nil end,
+		isOpen = function() return rednetState.open ~= nil end,
+		send = function(id, message, protocol)
+			rednetState.sent[#rednetState.sent + 1] =
+				{ id = id, message = message, protocol = protocol }
+			return true
+		end,
+		broadcast = function(message, protocol)
+			rednetState.sent[#rednetState.sent + 1] =
+				{ id = nil, message = message, protocol = protocol }
+			return true
+		end,
+		receive = function(protocol)
+			for i, m in ipairs(rednetState.inbox) do
+				if protocol == nil or m.protocol == protocol then
+					table.remove(rednetState.inbox, i)
+					return m.id, m.message, m.protocol
+				end
+			end
+			return nil    -- pas de message en attente : équivaut au timeout
+		end,
+	}
 	_G.gps = {
 		locate = function()
 			if not gpsOrigin then return nil end

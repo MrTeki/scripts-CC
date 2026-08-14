@@ -19,6 +19,9 @@ local MODULES = {
 	"test_ccInv",
 	"test_ccFuel",
 	"test_ccSave",
+	"test_ccUi",
+	"test_ccNet",
+	"test_integration",
 }
 
 local H = require("harness")

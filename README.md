@@ -66,11 +66,23 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | `ccSave` | fait | persistance atomique, clés nommées, versionnée + migration |
 | `ccInv` | fait | slots réservés, recherche d'item, liste de rebut, coffre à pose vérifiée |
 | `ccFuel` | fait | niveau normalisé (`"unlimited"`), budget de retour, ravitaillement au coffre |
-| `ccUi` | à faire | log à ring buffer, `drawBar`, table de boutons clavier/souris, moniteur externe |
-| `ccNet` | à faire | protocole rednet commun : `status`, `pause`, `resume`, `abort`, `home` |
+| `ccUi` | fait | journal à ring buffer, `drawBar`, boutons clavier/souris/tactile, moniteur |
+| `ccNet` | fait | sert `ccRemoteProtocol` sans bloquer, commandes mises en file |
 
 Aucune de ces APIs n'est encore consommée par un script : la migration de
-`ccQuarry.lua` et le bootstrap viennent après.
+`ccQuarry.lua` et le bootstrap viennent après. `test/test_integration.lua` les
+valide ensemble sur les situations que la carrière rencontrera vraiment.
+
+Deux règles structurantes, valables pour tout script qui les consomme :
+
+- **`ccUi` et `ccNet` ne touchent jamais au turtle.** Ils traduisent une entrée
+  en nom de commande et s'arrêtent là. C'est la machine à états qui exécute,
+  entre deux transitions. Sans cela, un clic sur REFUEL peut changer le slot
+  sélectionné au milieu d'un vidage en cours.
+- **La garde carburant de `ccFuel` doit être levée pour le trajet de retour**
+  (`ccNav.setGuard(nil)`). Elle raisonne sur la position courante, donc au
+  moment précis où la réserve est atteinte, elle interdirait aussi les
+  mouvements qui rapprochent de l'origine.
 
 ### Tests
 
