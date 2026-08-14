@@ -19,7 +19,7 @@ local M = {}
 -- ---------------------------------------------------------------------------
 
 local files, dirs, writeFaults, truncateFaults
-local world, entities, peripherals
+local world, entities, peripherals, gpsOrigin
 local t                    -- état du turtle
 local clock, events, timers, nextTimer
 local screen
@@ -43,7 +43,7 @@ local DELTA = {
 function M.reset(opts)
 	opts = opts or {}
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
-	world, entities, peripherals = {}, {}, {}
+	world, entities, peripherals, gpsOrigin = {}, {}, {}, nil
 	clock, events, timers, nextTimer = 0, {}, {}, 1
 	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
 	t = {
@@ -89,6 +89,13 @@ end
 
 function M.spawnEntity(x, y, z, hp)
 	entities[key(x, y, z)] = { hp = hp or 2 }
+end
+
+--- Active le GPS, en donnant les coordonnées MONDE de l'origine locale (0,0,0).
+-- Convention Minecraft pour le monde : wy est la verticale. Sans appel à cette
+-- fonction, gps.locate() renvoie nil, comme sans constellation à portée.
+function M.setGps(wx, wy, wz)
+	gpsOrigin = { wx = wx, wy = wy, wz = wz }
 end
 
 --- Branche un périphérique sur un côté. `api` est la table renvoyée par wrap().
@@ -692,6 +699,13 @@ function M.install()
 		end,
 	}
 	_G.sleep = os_.sleep
+	_G.gps = {
+		locate = function()
+			if not gpsOrigin then return nil end
+			-- local (x, y, z=vertical) -> monde (wx, wy=vertical, wz)
+			return gpsOrigin.wx + t.x, gpsOrigin.wy + t.z, gpsOrigin.wz + t.y
+		end,
+	}
 	for k, v in pairs(os_) do _G.os[k] = v end
 	return M
 end
