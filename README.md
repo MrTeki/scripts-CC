@@ -56,18 +56,38 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 /test/                harnais de test (mock turtle/fs/term) — ne part pas en jeu
 ```
 
-### APIs prévues
+### APIs
 
-| API | Contenu |
-|---|---|
-| `ccUtil` | `roundTo`, `indexOf`, `findPeripherals` |
-| `ccUi` | log à ring buffer, `drawBar`, table de boutons clavier/souris, moniteur externe |
-| `ccSave` | persistance atomique, clés nommées, versionnée + migration |
-| `ccVec` | position et direction, normalisation `dir % 4` |
-| `ccNav` | primitives de mouvement à contrat `ok, reason`, essais bornés, recalage GPS |
-| `ccInv` | listing de slots, slots réservés, recherche d'item, interaction coffre |
-| `ccFuel` | niveau normalisé (`"unlimited"`), budget de retour, ravitaillement au coffre |
-| `ccNet` | protocole rednet commun : `status`, `pause`, `resume`, `abort`, `home` |
+| API | État | Contenu |
+|---|---|---|
+| `ccUtil` | fait | `roundTo`, `clamp`, `indexOf`, `contains`, `copy`, `count`, `findPeripheral(s)` |
+| `ccVec` | fait | position et direction, normalisation `dir % 4`, `turnsBetween` |
+| `ccNav` | fait | mouvement à contrat `ok, raison, bloc`, essais bornés, `goTo`, GPS |
+| `ccSave` | fait | persistance atomique, clés nommées, versionnée + migration |
+| `ccUi` | à faire | log à ring buffer, `drawBar`, table de boutons clavier/souris, moniteur externe |
+| `ccInv` | à faire | listing de slots, slots réservés, recherche d'item, interaction coffre |
+| `ccFuel` | à faire | niveau normalisé (`"unlimited"`), budget de retour, ravitaillement au coffre |
+| `ccNet` | à faire | protocole rednet commun : `status`, `pause`, `resume`, `abort`, `home` |
+
+Aucune de ces APIs n'est encore consommée par un script : la migration de
+`ccQuarry.lua` et le bootstrap viennent après.
+
+### Tests
+
+Les APIs s'exécutent hors Minecraft, sous Lua 5.4 standard. `test/ccMock.lua`
+simule `fs`, `textutils`, `turtle`, `term`, `os`, `peripheral` et `gps`, et
+modélise les pannes plutôt que le cas nominal : gravier qui retombe, bedrock,
+coffre plein, panne sèche, écriture disque tronquée.
+
+```
+lua test/run.lua
+```
+
+Prérequis : `winget install DEVCOM.Lua`. Ajouter chaque nouveau fichier de test
+à la liste `MODULES` de `test/run.lua`.
+
+Les cas sont vérifiés par mutation : on réintroduit le bug d'origine dans l'API
+et on confirme que le test échoue, et qu'il échoue seul.
 
 ### Bootstrap
 
@@ -93,5 +113,6 @@ Le dépôt doit rester **public** : un turtle ne peut pas garder un token GitHub
 
 ## État
 
-`main` contient les scripts tels qu'ils tournaient avant refonte. La refonte de
-`ccQuarry.lua` et l'extraction des APIs se font par branches.
+`main` contient les scripts tels qu'ils tournaient avant refonte, sans
+modification. La refonte de `ccQuarry.lua` et l'extraction des APIs se font sur
+`refonte/apis-socle`.
