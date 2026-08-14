@@ -64,9 +64,9 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | `ccVec` | fait | position et direction, normalisation `dir % 4`, `turnsBetween` |
 | `ccNav` | fait | mouvement à contrat `ok, raison, bloc`, essais bornés, `goTo`, GPS |
 | `ccSave` | fait | persistance atomique, clés nommées, versionnée + migration |
+| `ccInv` | fait | slots réservés, recherche d'item, liste de rebut, coffre à pose vérifiée |
+| `ccFuel` | fait | niveau normalisé (`"unlimited"`), budget de retour, ravitaillement au coffre |
 | `ccUi` | à faire | log à ring buffer, `drawBar`, table de boutons clavier/souris, moniteur externe |
-| `ccInv` | à faire | listing de slots, slots réservés, recherche d'item, interaction coffre |
-| `ccFuel` | à faire | niveau normalisé (`"unlimited"`), budget de retour, ravitaillement au coffre |
 | `ccNet` | à faire | protocole rednet commun : `status`, `pause`, `resume`, `abort`, `home` |
 
 Aucune de ces APIs n'est encore consommée par un script : la migration de
