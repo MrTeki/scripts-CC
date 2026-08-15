@@ -197,6 +197,65 @@ H.case("le journal conserve la trace apres coup", function()
 end)
 
 -- ---------------------------------------------------------------------------
+-- Options
+-- ---------------------------------------------------------------------------
+
+H.case("le fichier d'options est cree au premier lancement", function()
+	terrain({ width = 2, depth = 2, height = 3 })
+	run("2", "2", "3")
+
+	local cfg = mock.getFile("ccquarry.cfg")
+	H.ok(cfg, "fichier cree")
+	H.contains(cfg, "dropWhenNoChest", "option presente")
+	H.contains(cfg, "trash", "liste de rebut presente")
+	H.contains(cfg, "edit ccquarry.cfg", "mode d'emploi en commentaire")
+end)
+
+H.case("vider la liste de rebut fait tout conserver", function()
+	terrain({ width = 2, depth = 2, height = 3 })
+	mock.putFile("ccquarry.cfg", "return { trash = {} }")
+
+	run("2", "2", "3")
+
+	-- Sans liste de rebut, plus rien ne part au sol : tout finit au coffre.
+	H.eq(mock.groundCount("minecraft:stone"), 0, "aucune pierre jetee")
+	local coffre = mock.getBlock(0, 0, -1)
+	H.isNil(coffre, "l'ender chest a bien ete repris")
+end)
+
+H.case("dropWhenNoChest = true fait jeter au lieu d'attendre", function()
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	mock.putFile("ccquarry.cfg", "return { dropWhenNoChest = true }")
+
+	local sorties = run("2", "2", "3")
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "la turtle n'attend pas")
+	H.eq(mock.groundCount("minecraft:iron_ore"), 1, "butin abandonne, comme demande")
+end)
+
+H.case("une option fautive est signalee sans bloquer le chantier", function()
+	terrain({ width = 2, depth = 2, height = 3 })
+	mock.putFile("ccquarry.cfg", "return { dropWhenNoChest = 'oui', fuelMagrin = 9 }")
+
+	local sorties = run("2", "2", "3")
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier mene a terme")
+
+	local trace = mock.getFile("ccquarry.log")
+	H.contains(trace, "dropWhenNoChest", "mauvais type signale")
+	H.contains(trace, "fuelMagrin", "faute de frappe signalee")
+end)
+
+H.case("config cree le fichier sans lancer de chantier", function()
+	terrain()
+	local sorties = run("config")
+
+	H.contains(table.concat(sorties, "\n"), "ccquarry.cfg", "chemin affiche")
+	H.ok(mock.getFile("ccquarry.cfg"), "fichier cree")
+	H.eq(mock.getTurtle().z, 0, "aucun chantier lance")
+end)
+
+-- ---------------------------------------------------------------------------
 -- Modes de dépôt
 -- ---------------------------------------------------------------------------
 

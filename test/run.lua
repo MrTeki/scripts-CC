@@ -15,6 +15,7 @@ package.path = table.concat({
 local MODULES = {
 	"test_ccBoot",
 	"test_ccUtil",
+	"test_ccConfig",
 	"test_ccPlan",
 	"test_ccVec",
 	"test_ccNav",

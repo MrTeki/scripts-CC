@@ -46,7 +46,7 @@
 local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/refonte/apis-socle/"
 
 local NEEDS = {
-	ccUtil = 1, ccVec = 1, ccPlan = 1, ccNav = 1, ccInv = 1,
+	ccUtil = 1, ccVec = 1, ccPlan = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
 	ccFuel = 1, ccSave = 1, ccUi = 1, ccNet = 1,
 }
 
@@ -95,6 +95,7 @@ local ccFuel = require("ccFuel")
 local ccSave = require("ccSave")
 local ccUi   = require("ccUi")
 local ccNet  = require("ccNet")
+local ccConfig = require("ccConfig")
 
 -- ---------------------------------------------------------------------------
 -- Configuration
@@ -104,15 +105,15 @@ local SAVE_PATH = "ccquarry.save"
 local SAVE_VERSION = 1
 local LOG_PATH = "ccquarry.log"
 
-local CONFIG = {
-	fuelMargin = 64,        -- carburant gardé en plus du trajet de retour
-	fuelTopUp = 2000,       -- visé lors d'un ravitaillement
-	trashWhere = "up",      -- le rebut part dans la couche déjà creusée
+local CONFIG_PATH = "ccquarry.cfg"
 
-	-- Sans coffre reconnu, la turtle ATTEND qu'on vienne vider son inventaire.
-	-- Mettre à true pour qu'elle dépose le butin au sol et continue : c'est
-	-- une perte assumée, jamais un comportement par défaut.
-	dropWhenNoChest = false,
+-- Valeurs par défaut. Le fichier ccquarry.cfg les remplace au cas par cas, et
+-- leur TYPE sert à valider ce qui y est saisi.
+local DEFAULTS = {
+	fuelMargin = 64,          -- carburant gardé en plus du trajet de retour
+	fuelTopUp = 2000,         -- visé lors d'un ravitaillement
+	trashWhere = "up",        -- le rebut part dans la couche déjà creusée
+	dropWhenNoChest = false,  -- sans coffre : attendre, plutôt que jeter
 	trash = {
 		"minecraft:cobblestone",
 		"minecraft:stone",
@@ -127,6 +128,53 @@ local CONFIG = {
 		"minecraft:netherrack",
 	},
 }
+
+-- Écrit tel quel à la première exécution, puis jamais réécrit : les
+-- modifications et les commentaires de l'utilisateur survivent aux
+-- lancements suivants.
+local CONFIG_TEMPLATE = [==[
+-- Options de ccQuarry. Modifiable en jeu avec : edit ccquarry.cfg
+-- Supprimer ce fichier le regenere avec les valeurs par defaut.
+
+return {
+    -- Que faire quand aucun coffre n'est disponible a l'origine, ni
+    -- transportable (ender chest, shulker) ni fixe (coffre pose derriere) ?
+    --   false : la turtle ATTEND qu'on vienne la vider. Rien n'est perdu,
+    --           mais elle peut attendre longtemps sans que vous le sachiez.
+    --   true  : elle depose le butin au sol et continue. Perte assumee.
+    dropWhenNoChest = false,
+
+    -- Blocs jetes a la volee au lieu d'etre rapportes. C'est le meilleur
+    -- levier pour espacer les allers-retours de vidage : sans cette liste,
+    -- une carriere passe son temps a rentrer.
+    -- Vider la liste ( trash = {} ) pour tout conserver.
+    trash = {
+        "minecraft:cobblestone",
+        "minecraft:stone",
+        "minecraft:dirt",
+        "minecraft:gravel",
+        "minecraft:granite",
+        "minecraft:diorite",
+        "minecraft:andesite",
+        "minecraft:tuff",
+        "minecraft:deepslate",
+        "minecraft:cobbled_deepslate",
+        "minecraft:netherrack",
+    },
+
+    -- Ou part le rebut : "up", "down" ou "forward".
+    -- "up" l'envoie dans la couche deja creusee, hors du chemin.
+    trashWhere = "up",
+
+    -- Carburant garde en reserve en plus du trajet de retour.
+    fuelMargin = 64,
+
+    -- Niveau vise lors d'un ravitaillement au coffre.
+    fuelTopUp = 2000,
+}
+]==]
+
+local CONFIG = DEFAULTS
 
 -- États. Le nom de l'état EST l'état : les drapeaux done / needFuel /
 -- needClearInventory de l'ancienne version, et les 64 combinaisons théoriques
@@ -697,9 +745,12 @@ local function usage()
 	print("ccQuarry <taille>      chantier cubique")
 	print("ccQuarry               reprend le chantier en cours")
 	print("ccQuarry del           abandonne le chantier en cours")
+	print("ccQuarry config        cree ou affiche les options")
+	print("ccQuarry update        met les APIs a jour")
 	print("")
 	print("Hauteur positive : on creuse vers le bas.")
 	print("Slot 1 : carburant. Slot 16 : coffre.")
+	print("Options : edit " .. CONFIG_PATH)
 end
 
 --- Construit le chantier à partir des arguments, ou le reprend.
@@ -711,6 +762,15 @@ local function setup(args)
 		store.delete()
 		removeStartup()
 		print("Chantier abandonne.")
+		return false
+	end
+
+	if args[1] == "config" then
+		local _, warnings, created = ccConfig.load(CONFIG_PATH, DEFAULTS, CONFIG_TEMPLATE)
+		print(created and ("Options creees : " .. CONFIG_PATH)
+			or ("Options existantes : " .. CONFIG_PATH))
+		for _, w in ipairs(warnings) do print("  " .. w) end
+		print("Modifier avec : edit " .. CONFIG_PATH)
 		return false
 	end
 
@@ -836,6 +896,11 @@ end
 
 -- L'ordre compte : ccNav.reset() remet la position à l'origine, il doit donc
 -- précéder setup(), qui la restaure depuis la sauvegarde.
+-- Les options sont lues AVANT tout le reste : elles décident du rebut, donc de
+-- ce que la turtle garde dès le premier bloc miné.
+local configWarnings, configCreated
+CONFIG, configWarnings, configCreated = ccConfig.load(CONFIG_PATH, DEFAULTS, CONFIG_TEMPLATE)
+
 ccNav.reset()
 ccInv.reset({ trash = CONFIG.trash })
 if not setup(args) then return end
@@ -846,6 +911,11 @@ ctx.drawTimer = os.startTimer(0.5)
 
 -- Diagnostic de départ : le coffre non reconnu est le piège le plus probable,
 -- puisque son identifiant dépend du mod installé.
+if configCreated then journal("Options creees : " .. CONFIG_PATH) end
+for _, w in ipairs(configWarnings) do journal("Options : " .. w) end
+journal(("Rebut : %d entrees, sans coffre : %s")
+	:format(#CONFIG.trash, CONFIG.dropWhenNoChest and "jeter" or "attendre"))
+
 local chestSlot = ccInv.findChest()
 if chestSlot then
 	journal("Coffre reconnu slot " .. chestSlot .. " : " .. ccInv.detail(chestSlot).name)

@@ -10,7 +10,8 @@ return {
 	version = 1,
 
 	apis = {
-		ccBoot  = { version = 1, path = "apis/ccBoot.lua" },
+		ccBoot   = { version = 1, path = "apis/ccBoot.lua" },
+		ccConfig = { version = 1, path = "apis/ccConfig.lua" },
 		ccUtil  = { version = 1, path = "apis/ccUtil.lua" },
 		ccVec   = { version = 1, path = "apis/ccVec.lua" },
 		ccPlan  = { version = 1, path = "apis/ccPlan.lua" },

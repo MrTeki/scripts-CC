@@ -61,6 +61,7 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | API | État | Contenu |
 |---|---|---|
 | `ccBoot` | fait | installe les APIs manquantes depuis le dépôt, manifeste, atomique |
+| `ccConfig` | fait | options dans un fichier Lua éditable en jeu, gabarit commenté, validation |
 | `ccUtil` | fait | `roundTo`, `clamp`, `indexOf`, `contains`, `copy`, `count`, `findPeripheral(s)` |
 | `ccPlan` | fait | parcours en serpentin d'un volume, en couches ; progression exacte |
 | `ccVec` | fait | position et direction, normalisation `dir % 4`, `turnsBetween` |
