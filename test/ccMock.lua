@@ -22,7 +22,7 @@ local files, dirs, writeFaults, truncateFaults
 local world, entities, peripherals, gpsOrigin, ground, rednetState
 local httpRoutes, httpLog, httpEnabled
 local t                    -- état du turtle
-local clock, events, timers, nextTimer
+local clock, events, timers, nextTimer, eventBudget
 local screen
 
 local FUEL_VALUES = {
@@ -48,6 +48,10 @@ function M.reset(opts)
 	rednetState = { open = nil, sent = {}, inbox = {} }
 	httpRoutes, httpLog, httpEnabled = {}, {}, true
 	clock, events, timers, nextTimer = 0, {}, {}, 1
+	-- Volontairement bas : les tests normaux consomment très peu d'événements,
+	-- donc un plafond serré fait échouer une boucle sans fin en quelques
+	-- secondes plutôt que de figer la suite.
+	eventBudget = opts.eventBudget or 2000
 	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
 	t = {
 		x = 0, y = 0, z = 0, dir = 0,
@@ -641,8 +645,18 @@ function os_.startTimer(s)
 	return id
 end
 
+--- Plafonne le nombre d'événements consommés. Un script qui attend
+--- indéfiniment -- ce qui est parfois le comportement VOULU, par exemple quand
+--- la turtle attend qu'on la vide -- ferait sinon figer la suite de tests au
+--- lieu d'échouer.
+function M.setEventBudget(n) eventBudget = n end
+
 function os_.pullEvent(filter)
 	while true do
+		eventBudget = eventBudget - 1
+		if eventBudget < 0 then
+			error("ccMock : budget d'evenements epuise (attente sans fin ?)", 0)
+		end
 		if #events > 0 then
 			local e = table.remove(events, 1)
 			if not filter or e[1] == filter then return table.unpack(e) end

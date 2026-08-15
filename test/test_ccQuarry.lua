@@ -35,11 +35,16 @@ local function terrain(o)
 	mock.install()
 	mock.getTurtle().fuel = o.fuel or 5000
 	mock.setSlot(1, "minecraft:coal", 32)     -- le slot réservé doit être occupé
-	mock.setSlot(16, ENDER, 1)
+	if not o.noChest then mock.setSlot(16, ENDER, 1) end
 
 	local w, d, h = o.width or 2, o.depth or 2, o.height or 3
 	-- Pierre de z = -1 à z = -(h + marge). La surface z = 0 reste de l'air.
 	mock.fill(0, 0, -(h + 3), w - 1, d - 1, -1, "minecraft:stone")
+
+	-- Du butin non jetable, pour vérifier où il finit.
+	if o.ore then
+		for _, p in ipairs(o.ore) do mock.setBlock(p[1], p[2], p[3], "minecraft:iron_ore") end
+	end
 end
 
 --- Blocs restants dans le volume du chantier.
@@ -189,6 +194,85 @@ H.case("le journal conserve la trace apres coup", function()
 	H.ok(trace, "le journal existe")
 	H.contains(trace, "Coffre reconnu", "diagnostic du coffre au demarrage")
 	H.contains(trace, "FINITION", "les transitions d'etat y figurent")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Modes de dépôt
+-- ---------------------------------------------------------------------------
+
+H.case("un coffre classique DERRIERE l'origine recoit le butin", function()
+	-- Le mode historique : l'ancien script faisait GoTo(0,0,0,2) puis drop(),
+	-- ce qui imposait le coffre derrière la turtle. C'est la régression
+	-- signalée en jeu -- la refonte ne gérait plus que le coffre transportable.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 }, { 0, 1, -2 } } })
+	mock.setChest(-1, 0, 0, {}, 27)     -- derrière la turtle, qui regarde +X
+
+	local sorties = run("2", "2", "3")
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier fini")
+	local coffre = mock.getBlock(-1, 0, 0).inventory
+	H.ok(coffre[1], "le coffre a recu quelque chose")
+	H.eq(coffre[1].name, "minecraft:iron_ore", "le minerai est dans le coffre")
+	H.eq(coffre[1].count, 2, "les deux blocs")
+	H.eq(mock.groundCount("minecraft:iron_ore"), 0, "rien de perdu au sol")
+end)
+
+H.case("le coffre fixe est trouve derriere, a gauche ou au-dessus", function()
+	-- Les seules positions viables : la carrière s'étend vers l'AVANT et vers
+	-- la DROITE, donc un coffre posé de ces côtés serait miné avec le reste.
+	for _, p in ipairs({ { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, 1 } }) do
+		terrain({ width = 2, depth = 2, height = 3, noChest = true,
+			ore = { { 1, 1, -1 } } })
+		mock.setChest(p[1], p[2], p[3], {}, 27)
+
+		run("2", "2", "3")
+		local coffre = mock.getBlock(p[1], p[2], p[3]).inventory
+		local label = table.concat(p, ",")
+		H.ok(coffre[1], "coffre en " .. label)
+		H.eq(coffre[1].name, "minecraft:iron_ore", label .. " : minerai depose")
+	end
+end)
+
+H.case("un coffre pose DANS l'emprise est mine, et la turtle attend", function()
+	-- Piège réel : la carrière s'étend vers l'avant et la droite. Un coffre
+	-- placé là disparait en cours de chantier. La turtle ne doit alors pas
+	-- jeter son butin, mais attendre.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	mock.setChest(1, 0, 0, {}, 27)      -- devant : dans le volume
+
+	mock.setEventBudget(30)
+	pcall(run, "2", "2", "3")
+
+	H.isNil(mock.getBlock(1, 0, 0), "le coffre a bien ete mine")
+	H.eq(mock.groundCount("minecraft:iron_ore"), 0, "le minerai n'est pas perdu")
+end)
+
+H.case("le coffre transportable prime sur le conteneur fixe", function()
+	terrain({ width = 2, depth = 2, height = 3, ore = { { 1, 1, -1 } } })
+	mock.setChest(-1, 0, 0, {}, 27)
+
+	run("2", "2", "3")
+	-- L'ender chest est posé SOUS l'origine : le butin y va, pas dans le
+	-- coffre fixe.
+	H.isNil(mock.getBlock(-1, 0, 0).inventory[1], "le coffre fixe reste vide")
+end)
+
+H.case("un bloc plein derriere l'origine n'est pas pris pour un coffre", function()
+	-- Sans inspection, turtle.drop() aurait « reussi » en jetant au sol.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	mock.setBlock(-1, 0, 0, "minecraft:stone")
+
+	-- L'attente est ici le comportement voulu et n'a pas de fin : on borne le
+	-- nombre d'événements pour que le test se termine.
+	mock.setEventBudget(30)
+	pcall(run, "2", "2", "3")
+
+	local trace = mock.getFile("ccquarry.log")
+	H.contains(trace, "vider la turtle", "la turtle attend au lieu de jeter")
+	H.eq(mock.groundCount("minecraft:iron_ore"), 0, "le minerai n'est pas perdu")
 end)
 
 -- ---------------------------------------------------------------------------

@@ -130,6 +130,38 @@ H.case("findChest ignore ce qui n'est pas un conteneur transportable", function(
 	end
 end)
 
+H.case("isDepot accepte tout inventaire fixe, isChest reste restrictif", function()
+	fresh()
+	-- Un conteneur fixe n'est jamais cassé par la turtle : n'importe quel
+	-- inventaire convient. Le coffre transportable, lui, doit garder son
+	-- contenu quand on le casse.
+	for _, name in ipairs({ "minecraft:chest", "minecraft:trapped_chest",
+		"minecraft:barrel", "minecraft:hopper", "storagedrawers:basicdrawers",
+		"ironchest:iron_chest" }) do
+		H.eq(ccInv.isDepot(name), true, "depot : " .. name)
+		H.eq(ccInv.isChest(name), false, "pas transportable : " .. name)
+	end
+
+	H.eq(ccInv.isDepot("minecraft:stone"), false, "pierre")
+	H.eq(ccInv.isDepot("minecraft:dirt"), false, "terre")
+end)
+
+H.case("depotAt inspecte au lieu de tenter un dépôt", function()
+	-- turtle.drop() réussit AUSSI quand il n'y a rien en face : sans
+	-- inspection, « déposer dans le coffre » et « perdre son butin au sol »
+	-- sont indiscernables.
+	fresh()
+	H.eq(ccInv.depotAt("forward"), false, "rien devant")
+
+	mock.setBlock(1, 0, 0, "minecraft:stone")
+	H.eq(ccInv.depotAt("forward"), false, "un bloc plein n'est pas un dépôt")
+
+	mock.setChest(1, 0, 0, {}, 27)
+	local found, name = ccInv.depotAt("forward")
+	H.eq(found, true, "coffre devant")
+	H.eq(name, "minecraft:chest", "nom remonté")
+end)
+
 H.case("moveTo transfère et vide le slot source", function()
 	fresh()
 	mock.setSlot(4, "minecraft:coal", 30)

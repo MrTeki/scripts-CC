@@ -48,16 +48,29 @@ local DEFAULTS = {
 
 	-- Motifs de repli, cherchés dans l'identifiant en minuscules. Une liste de
 	-- noms exacts ne peut pas suivre les identifiants de tous les mods : c'est
-	-- ce qui faisait qu'un ender chest non prévu n'était pas reconnu du tout,
-	-- et que le butin partait au sol.
-	-- Seuls les conteneurs qui GARDENT leur contenu quand on les casse sont
-	-- éligibles : un coffre ordinaire éparpillerait tout à la reprise.
+	-- ce qui faisait qu'un ender chest non prévu n'était pas reconnu du tout.
+	--
+	-- Ne concerne QUE le coffre transportable, celui que la turtle emporte,
+	-- pose, vide et reprend. Seuls les conteneurs qui gardent leur contenu
+	-- quand on les casse sont éligibles : un coffre ordinaire éparpillerait
+	-- tout à la reprise.
 	chestPatterns = {
 		"ender_chest",
 		"enderchest",
 		"ender_storage",
 		"enderstorage",
 		"shulker_box",
+	},
+
+	-- Conteneurs FIXES, posés dans le monde et jamais cassés par la turtle.
+	-- N'importe quel inventaire fait l'affaire, puisqu'on ne fait qu'y déposer.
+	depotPatterns = {
+		"chest",
+		"barrel",
+		"shulker",
+		"hopper",
+		"drawer",
+		"crate",
 	},
 
 	-- Rebut : jeté à la volée plutôt que rapporté. Vide par défaut, c'est à
@@ -223,9 +236,32 @@ function M.findChest()
 	return nil
 end
 
-local PLACES = { forward = "place", up = "placeUp", down = "placeDown" }
-local DIGS   = { forward = "dig",   up = "digUp",   down = "digDown" }
-local SUCKS  = { forward = "suck",  up = "suckUp",  down = "suckDown" }
+local PLACES   = { forward = "place",   up = "placeUp",   down = "placeDown" }
+local DIGS     = { forward = "dig",     up = "digUp",     down = "digDown" }
+local SUCKS    = { forward = "suck",    up = "suckUp",    down = "suckDown" }
+local INSPECTS = { forward = "inspect", up = "inspectUp", down = "inspectDown" }
+
+--- Ce nom désigne-t-il un conteneur fixe, où l'on peut déposer ?
+function M.isDepot(name)
+	if not name then return false end
+	local lowered = name:lower()
+	for _, pattern in ipairs(config.depotPatterns or {}) do
+		if lowered:find(pattern, 1, true) then return true end
+	end
+	return false
+end
+
+--- Y a-t-il un conteneur fixe dans cette direction ?
+-- On INSPECTE au lieu de tenter un dépôt : turtle.drop() réussit aussi quand
+-- il n'y a rien en face, en faisant simplement tomber l'objet au sol. Sans
+-- cette vérification, « déposer dans le coffre » et « perdre son butin » sont
+-- indiscernables.
+-- @return present, nom du bloc
+function M.depotAt(where)
+	local seen, info = turtle[INSPECTS[where or "forward"]]()
+	if not seen or not info then return false end
+	return M.isDepot(info.name), info.name
+end
 
 --- Pose le coffre, en vérifiant que la pose a réussi.
 -- @return true, ou false + raison

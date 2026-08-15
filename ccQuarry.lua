@@ -11,7 +11,17 @@
 --
 -- Conventions (voir README) : X / Y horizontaux, Z vertical, direction 0 = +X.
 -- L'origine est la position de départ de la turtle, qui doit regarder dans la
--- direction de la largeur. Le coffre se pose sous l'origine.
+-- direction de la largeur.
+--
+-- Trois façons de récupérer le butin, essayées dans cet ordre :
+--   1. un coffre TRANSPORTABLE en inventaire (ender chest, shulker) : la
+--      turtle le pose sous elle, le vide et le reprend ;
+--   2. un conteneur FIXE contre l'origine. C'est le mode historique, avec un
+--      coffre posé derrière la turtle. Le placer DERRIÈRE, À GAUCHE ou
+--      AU-DESSUS : la carrière s'étend vers l'avant et vers la droite, donc un
+--      coffre posé de ces côtés-là serait miné avec le reste ;
+--   3. aucun des deux : la turtle attend qu'on vienne la vider.
+-- Le conteneur fixe sert aussi de source de carburant.
 --
 -- Slots réservés : 1 = carburant, 16 = coffre. Le jeu ne les protège pas :
 -- il faut donc du carburant en slot 1 AU DÉPART, sinon le butin s'y installe.
@@ -517,6 +527,34 @@ local function placeChest()
 	return ok
 end
 
+--- Cherche un conteneur fixe autour de l'origine.
+--
+-- C'est le mode de dépôt historique, qu'il fallait rétablir : un coffre posé
+-- contre la turtle à son point de départ. L'ancien script faisait
+-- `GoTo(0,0,0,2)` puis `turtle.drop()`, ce qui imposait de le placer DERRIÈRE
+-- l'origine, sans que ce soit écrit nulle part. Ici les quatre côtés et le
+-- dessus sont examinés, donc n'importe quelle position convient.
+--
+-- La turtle finit face au conteneur quand il est horizontal.
+-- @return "forward", "up" ou nil
+local function findDepot()
+	for _ = 1, 4 do
+		local found, name = ccInv.depotAt("forward")
+		if found then
+			journal("Depot fixe : " .. name)
+			return "forward"
+		end
+		ccNav.turnRight()
+	end
+
+	local above, name = ccInv.depotAt("up")
+	if above then
+		journal("Depot fixe au-dessus : " .. name)
+		return "up"
+	end
+	return nil
+end
+
 --- Trace le contenu de l'inventaire, pour comprendre après coup ce qui a été
 --- gardé, jeté ou déposé.
 local function journalInventory()
@@ -528,24 +566,52 @@ local function journalInventory()
 	journal("Inventaire " .. (#parts == 0 and "vide" or table.concat(parts, " ")))
 end
 
-STATES[S.SERVICE] = function()
+--- Vide l'inventaire par le meilleur moyen disponible, et ravitaille au passage.
+-- Trois modes, dans l'ordre de préférence :
+--   1. coffre transportable, posé puis repris ;
+--   2. conteneur fixe autour de l'origine ;
+--   3. rien -- l'appelant décide alors d'attendre ou de jeter.
+-- @return "chest", "depot" ou nil
+local function serviceUnload(refuel)
 	if placeChest() then
 		local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
 		if not ok then
 			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
 		end
 
-		if ccFuel.level() < CONFIG.fuelTopUp then
+		if refuel and ccFuel.level() < CONFIG.fuelTopUp then
 			local fine, why = ccFuel.refuelFromChest("down", CONFIG.fuelTopUp)
 			if not fine then journal("Carburant : " .. tostring(why)) end
 		end
 
 		local taken, why = ccInv.takeChest("down")
 		if not taken then journal("Reprise du coffre : " .. tostring(why)) end
+		return "chest"
+	end
 
-	else
-		-- Sans coffre : on brûle le combustible qu'on a, on se débarrasse du
-		-- rebut, et le reste du service dépend d'un humain.
+	local where = findDepot()
+	if where then
+		local ok, reason, slot = ccInv.unload(where, { trashWhere = CONFIG.trashWhere })
+		if not ok then
+			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
+		end
+
+		-- Le conteneur fixe sert aussi de source de carburant : c'est là qu'on
+		-- vient déposer du charbon pour la turtle.
+		if refuel and ccFuel.level() < CONFIG.fuelTopUp then
+			local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
+			if not fine then journal("Carburant : " .. tostring(why)) end
+		end
+		return "depot"
+	end
+
+	return nil
+end
+
+STATES[S.SERVICE] = function()
+	if not serviceUnload(true) then
+		-- Aucun moyen de dépôt : on brûle ce qu'on a, on jette le rebut, et le
+		-- reste du service dépend d'un humain.
 		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
 		ccInv.dumpTrash(CONFIG.trashWhere)
 		if CONFIG.dropWhenNoChest then
@@ -598,25 +664,19 @@ STATES[S.FINISHING] = function()
 	journalInventory()
 
 	if ccInv.freeCount() < 14 then
-		if placeChest() then
-			local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
-			if not ok then
-				journal("Vidage final : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
-			end
-			local taken, why = ccInv.takeChest("down")
-			if not taken then journal("Reprise du coffre : " .. tostring(why)) end
-
-		elseif CONFIG.dropWhenNoChest then
-			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
-
-		else
-			-- Le chantier est fini mais la turtle tient encore du butin : elle
-			-- attend qu'on la vide plutôt que de l'abandonner au sol.
-			ccInv.dumpTrash(CONFIG.trashWhere)
-			if ccInv.freeCount() < 14 then
-				journal("Chantier fini : vider la turtle pour qu'elle s'arrete")
-				ctx.afterWait = S.FINISHING
-				return S.AWAIT_HUMAN
+		-- Pas de ravitaillement ici : le chantier est fini.
+		if not serviceUnload(false) then
+			if CONFIG.dropWhenNoChest then
+				ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
+			else
+				-- Le chantier est fini mais la turtle tient encore du butin :
+				-- elle attend qu'on la vide plutôt que de l'abandonner au sol.
+				ccInv.dumpTrash(CONFIG.trashWhere)
+				if ccInv.freeCount() < 14 then
+					journal("Chantier fini : vider la turtle pour qu'elle s'arrete")
+					ctx.afterWait = S.FINISHING
+					return S.AWAIT_HUMAN
+				end
 			end
 		end
 		journalInventory()
