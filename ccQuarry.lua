@@ -30,7 +30,10 @@
 -- Le reste de la logique vit dans ccBoot, pour qu'une évolution du mécanisme
 -- ne demande pas de rééditer les six scripts installés.
 
-local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
+-- Pointe sur la branche de refonte le temps des essais. À rebasculer sur
+-- .../scripts-CC/main/ une fois refonte/apis-socle fusionnée.
+-- (GitHub raw résout bien un nom de branche contenant un /.)
+local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/refonte/apis-socle/"
 
 local NEEDS = {
 	ccUtil = 1, ccVec = 1, ccPlan = 1, ccNav = 1, ccInv = 1,

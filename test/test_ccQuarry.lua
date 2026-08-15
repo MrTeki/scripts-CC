@@ -7,6 +7,15 @@ local ccPlan = require("ccPlan")
 
 local ENDER = "enderstorage:ender_chest"
 
+--- URL du dépôt, lue DANS ccQuarry.lua : figée ici, elle divergerait au
+--- premier changement de branche.
+local function repoUrl()
+	local f = assert(io.open("ccQuarry.lua", "r"))
+	local src = f:read("a")
+	f:close()
+	return assert(src:match('local REPO = "([^"]+)"'), "REPO introuvable dans ccQuarry.lua")
+end
+
 --- Charge ccQuarry.lua et l'exécute avec les arguments donnés.
 -- La sortie console est mise en sourdine : le script imprime son bilan.
 local function run(...)
@@ -89,7 +98,7 @@ H.case("update consulte le manifeste et n'installe que ce qui est en retard", fu
 	local f = assert(io.open("manifest.lua", "r"))
 	local reel = f:read("a")
 	f:close()
-	mock.setUrl("https://raw.githubusercontent.com/MrTeki/scripts-CC/main/manifest.lua", reel)
+	mock.setUrl(repoUrl() .. "manifest.lua", reel)
 
 	local sorties = run("update")
 
