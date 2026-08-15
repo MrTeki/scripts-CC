@@ -223,6 +223,21 @@ local function journal(msg)
 	handle.close()
 end
 
+--- Attend un événement, en traitant Ctrl+T comme une demande d'arrêt propre.
+--
+-- os.pullEvent transforme l'interruption en erreur « Terminated » : selon la
+-- coroutine où elle tombe, le script mourait sur une erreur Lua brute ou
+-- basculait en ERREUR. Or Ctrl+T est le seul moyen de reprendre la main pour
+-- modifier les options, et c'est une manoeuvre normale, pas une panne.
+local function waitEvent(filter)
+	local event = { os.pullEventRaw(filter) }
+	if event[1] == "terminate" then
+		ctx.interrupted = true
+		ctx.stopped = true
+	end
+	return table.unpack(event)
+end
+
 -- ---------------------------------------------------------------------------
 -- Fichier de démarrage
 -- ---------------------------------------------------------------------------
@@ -386,8 +401,9 @@ local function drainRemote()
 end
 
 local function collect()
-	local e = { os.pullEvent() }
+	local e = { waitEvent() }
 	local name = e[1]
+	if ctx.stopped then return end
 
 	if name == "char" or name == "mouse_click" or name == "monitor_touch" then
 		local cmd = ccUi.dispatch(table.unpack(e))
@@ -695,7 +711,8 @@ end
 STATES[S.AWAIT_HUMAN] = function()
 	local timer = os.startTimer(5)
 	repeat
-		local event, id = os.pullEvent()
+		local event, id = waitEvent()
+		if ctx.stopped then return S.AWAIT_HUMAN end
 	until event == "turtle_inventory" or (event == "timer" and id == timer)
 
 	-- La décision de repartir appartient à l'état qui a demandé l'attente :
@@ -704,7 +721,7 @@ STATES[S.AWAIT_HUMAN] = function()
 end
 
 STATES[S.PAUSED] = function()
-	os.pullEvent()
+	waitEvent()
 	return S.PAUSED
 end
 
@@ -905,6 +922,13 @@ ccNav.reset()
 ccInv.reset({ trash = CONFIG.trash })
 if not setup(args) then return end
 
+-- Sauvegarde à CHAQUE mouvement, et pas seulement aux transitions d'état.
+-- Sans cela, une interruption en plein déplacement laisse une position en
+-- retard d'une cellule, et la reprise repart d'un point faux : tout le
+-- chantier se décale. Avec un GPS le recalage corrigerait, mais on ne peut
+-- pas compter dessus.
+ccNav.configure({ onMove = function() save() end })
+
 setupUi()
 setupNet()
 ctx.drawTimer = os.startTimer(0.5)
@@ -931,7 +955,16 @@ save()
 parallel.waitForAny(machine, events)
 
 ccUi.clear()
-if ctx.state == S.DONE then
+if ctx.interrupted then
+	save()
+	journal("Interrompu par Ctrl+T")
+	print("Interrompu. Le chantier est sauvegarde.")
+	print("")
+	print("  edit " .. CONFIG_PATH .. "   modifier les options")
+	print("  ccQuarry            reprendre")
+	print("  ccQuarry del        abandonner")
+
+elseif ctx.state == S.DONE then
 	print("Carriere terminee.")
 	if ctx.skips > 0 then print(ctx.skips .. " cellules inatteignables.") end
 else

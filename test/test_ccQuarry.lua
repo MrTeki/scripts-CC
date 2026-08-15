@@ -197,6 +197,60 @@ H.case("le journal conserve la trace apres coup", function()
 end)
 
 -- ---------------------------------------------------------------------------
+-- Interruption
+-- ---------------------------------------------------------------------------
+
+H.case("Ctrl+T interrompt proprement et conserve la sauvegarde", function()
+	-- Sans coffre, la turtle finit par attendre : c'est le moment où Ctrl+T
+	-- reprend la main. os.pullEvent transformait l'interruption en erreur
+	-- « Terminated », donc en état ERREUR.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	os.queueEvent("terminate")
+
+	local sorties = run("2", "2", "3")
+	local texte = table.concat(sorties, "\n")
+
+	H.contains(texte, "Interrompu", "arrêt annoncé comme volontaire")
+	H.eq(texte:find("ERREUR", 1, true), nil, "pas presente comme une panne")
+	H.contains(texte, "ccQuarry", "la reprise est expliquee")
+	H.contains(texte, "edit ccquarry.cfg", "l'edition des options est expliquee")
+
+	-- Le point essentiel : le chantier reste reprenable.
+	H.ok(fs.exists("ccquarry.save"), "sauvegarde conservee")
+	H.ok(fs.exists("startup.lua"), "reprise au reboot conservee")
+end)
+
+H.case("la position est sauvegardee a chaque mouvement", function()
+	-- Aux seules transitions d'état, une interruption en plein déplacement
+	-- laisse une position en retard d'une cellule, et la reprise décale tout.
+	terrain({ width = 3, depth = 3, height = 6 })
+
+	local positions = {}
+	local vraiForward = turtle.forward
+	turtle.forward = function()
+		local ok = vraiForward()
+		if ok then
+			local saved = textutils.unserialize(mock.getFile("ccquarry.save") or "")
+			positions[#positions + 1] = saved and saved.data
+				and (saved.data.pos.x .. "," .. saved.data.pos.y .. "," .. saved.data.pos.z)
+		end
+		return ok
+	end
+
+	run("3", "3", "6")
+	turtle.forward = vraiForward
+
+	H.ok(#positions > 5, "plusieurs mouvements observes")
+	-- Chaque relevé doit être distinct du précédent : la sauvegarde suit.
+	local distincts = 0
+	for i = 2, #positions do
+		if positions[i] ~= positions[i - 1] then distincts = distincts + 1 end
+	end
+	H.eq(distincts, #positions - 1, "la position enregistree change a chaque pas")
+end)
+
+-- ---------------------------------------------------------------------------
 -- Options
 -- ---------------------------------------------------------------------------
 
