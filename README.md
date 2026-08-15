@@ -60,6 +60,7 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 
 | API | État | Contenu |
 |---|---|---|
+| `ccBoot` | fait | installe les APIs manquantes depuis le dépôt, manifeste, atomique |
 | `ccUtil` | fait | `roundTo`, `clamp`, `indexOf`, `contains`, `copy`, `count`, `findPeripheral(s)` |
 | `ccPlan` | fait | parcours en serpentin d'un volume, en couches ; progression exacte |
 | `ccVec` | fait | position et direction, normalisation `dir % 4`, `turnsBetween` |
@@ -72,8 +73,6 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 
 `ccQuarry.lua` les consomme toutes. `test/test_integration.lua` les valide
 ensemble, et `test/test_ccQuarry.lua` exécute le script entier sous le mock.
-Le bootstrap réseau reste à faire : pour l'instant les APIs doivent être
-copiées à la main dans `/apis/` sur l'ordinateur.
 
 Deux règles structurantes, valables pour tout script qui les consomme :
 
@@ -105,23 +104,41 @@ et on confirme que le test échoue, et qu'il échoue seul.
 
 ### Bootstrap
 
-Un préambule identique en tête de chaque script installe les APIs manquantes depuis
-ce dépôt, via `raw.githubusercontent.com`. Règles :
+Une amorce d'une trentaine de lignes en tête de chaque script installe les APIs
+manquantes depuis ce dépôt, via `raw.githubusercontent.com`. La logique vit dans
+[`apis/ccBoot.lua`](apis/ccBoot.lua), pour qu'une évolution du mécanisme ne
+demande pas de rééditer les scripts déjà installés.
 
-1. **Un seul point d'entrée en dur** : l'URL de `manifest.lua`. Mettre à jour une API
-   = mettre à jour le manifeste, jamais les scripts déployés.
-   *(L'ancien `CCSuiteUpdater` codait 11 ids pastebin en dur et est devenu ingérable.)*
-2. **Pas de requête réseau au démarrage** si tout est présent et à jour. Un turtle
-   reboote à chaque chargement de chunk ; télécharger à chaque boot ferait tomber
-   les limites de débit.
-3. **Installation atomique** : téléchargement en `.tmp`, vérification syntaxique via
-   `load()`, puis `fs.move`. Un téléchargement tronqué ne doit jamais casser
-   l'installation.
-4. **Échec doux** : si `http` est indisponible mais que les APIs sont déjà là, on
-   continue. Sinon, message explicite nommant l'API et son URL.
-5. Rafraîchissement forcé par `<script> update`.
+1. **Un seul point d'entrée en dur** : `REPO`, l'URL du dépôt. Le reste passe par
+   [`manifest.lua`](manifest.lua), qui décide où vivent les fichiers et quelles
+   versions font foi. Déplacer un fichier ou publier une version se fait dans le
+   dépôt, jamais en rééditant les scripts déployés.
+   *(`CCSuiteUpdater` codait 11 identifiants pastebin en dur, dupliqués deux fois.
+   Chaque mise à jour produisait un nouvel identifiant : le mécanisme est devenu
+   ingérable dès la première évolution.)*
+2. **Aucune requête réseau au démarrage** si tout est présent et à jour. Règle
+   critique : un turtle reboote à chaque chargement de chunk et `startup` relance
+   le script.
+3. **Installation atomique** : téléchargement, contrôle de syntaxe par `load()`,
+   écriture en `.tmp`, puis `fs.move`. Un téléchargement tronqué ne peut pas
+   casser une installation qui fonctionnait.
+4. **Échec doux** : si `http` est indisponible mais que tout est là, on continue
+   en silence. Sinon, message nommant les APIs manquantes et l'URL.
+5. `<script> update` consulte le manifeste et n'installe que ce qui est en
+   retard — il ne retélécharge pas tout à l'aveugle.
 
-Le dépôt doit rester **public** : un turtle ne peut pas garder un token GitHub secret.
+Le dépôt doit rester **public** : un turtle ne peut pas garder un token GitHub
+secret.
+
+### Installer sur un ordinateur en jeu
+
+```
+pastebin get <id> ccQuarry
+ccQuarry 16 16 64
+```
+
+Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossier
+`apis/` à la main ; le script le dit explicitement et donne l'URL.
 
 ---
 

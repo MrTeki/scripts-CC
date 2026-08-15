@@ -13,6 +13,7 @@ package.path = table.concat({
 
 -- Ajouter ici chaque nouveau fichier de test.
 local MODULES = {
+	"test_ccBoot",
 	"test_ccUtil",
 	"test_ccPlan",
 	"test_ccVec",

@@ -19,6 +19,60 @@
 -- Ce script ne contient plus que ce qui lui est propre : la machine à états,
 -- l'interface et les arguments. Le reste vit dans les APIs partagées.
 
+-- ---------------------------------------------------------------------------
+-- Amorce
+-- ---------------------------------------------------------------------------
+-- Un SEUL point d'entrée en dur : l'URL du dépôt. Mettre à jour une API se
+-- fait en publiant le dépôt, jamais en rééditant les scripts déployés.
+-- CCSuiteUpdater codait onze identifiants pastebin en dur et devenait
+-- ingérable dès la première mise à jour ; une URL GitHub raw est stable.
+--
+-- Le reste de la logique vit dans ccBoot, pour qu'une évolution du mécanisme
+-- ne demande pas de rééditer les six scripts installés.
+
+local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
+
+local NEEDS = {
+	ccUtil = 1, ccVec = 1, ccPlan = 1, ccNav = 1, ccInv = 1,
+	ccFuel = 1, ccSave = 1, ccUi = 1, ccNet = 1,
+}
+
+local args = { ... }
+
+local function boot()
+	package.path = "/apis/?.lua;apis/?.lua;" .. package.path
+
+	if not fs.exists("apis/ccBoot.lua") and not pcall(require, "ccBoot") then
+		if not http then
+			error("apis/ccBoot.lua manquant et HTTP indisponible.\n"
+				.. "Copier le dossier apis/ depuis " .. REPO, 0)
+		end
+		local res = http.get(REPO .. "apis/ccBoot.lua")
+		if not res then error("Telechargement de ccBoot impossible : " .. REPO, 0) end
+		local body = res.readAll()
+		res.close()
+		fs.makeDir("apis")
+		local f = fs.open("apis/ccBoot.lua", "w")
+		f.write(body)
+		f.close()
+	end
+
+	local ok, result = require("ccBoot").ensure(REPO, NEEDS, { check = args[1] == "update" })
+	if not ok then error(result, 0) end
+	return result
+end
+
+local installed = boot()
+
+if args[1] == "update" then
+	if #installed == 0 then
+		print("APIs deja a jour.")
+	else
+		print("APIs installees : " .. table.concat(installed, ", "))
+	end
+	return
+end
+
 local ccUtil = require("ccUtil")
 local ccVec  = require("ccVec")
 local ccPlan = require("ccPlan")
@@ -617,8 +671,6 @@ local function events()
 		draw()
 	end
 end
-
-local args = { ... }
 
 -- L'ordre compte : ccNav.reset() remet la position à l'origine, il doit donc
 -- précéder setup(), qui la restaure depuis la sauvegarde.

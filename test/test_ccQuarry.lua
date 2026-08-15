@@ -74,6 +74,31 @@ H.case("dimension nulle : refus explicite", function()
 	H.contains(table.concat(sorties, "\n"), "non nulles", "message")
 end)
 
+H.case("l'amorce ne touche pas au réseau quand les APIs sont là", function()
+	-- La règle critique du bootstrap : un turtle redémarre à chaque
+	-- rechargement de chunk, et startup relance le script.
+	terrain({ width = 2, depth = 2, height = 3 })
+	run("2", "2", "3")
+	H.eq(#mock.httpRequests(), 0, "aucune requête HTTP")
+end)
+
+H.case("update consulte le manifeste et n'installe que ce qui est en retard", function()
+	terrain()
+	-- Le VRAI manifeste du dépôt est servi : le test vérifie donc aussi qu'il
+	-- s'évalue correctement et qu'il déclare les versions attendues.
+	local f = assert(io.open("manifest.lua", "r"))
+	local reel = f:read("a")
+	f:close()
+	mock.setUrl("https://raw.githubusercontent.com/MrTeki/scripts-CC/main/manifest.lua", reel)
+
+	local sorties = run("update")
+
+	H.eq(#mock.httpRequests(), 1, "seul le manifeste est telecharge")
+	H.contains(table.concat(sorties, "\n"), "a jour", "message")
+	H.eq(mock.getTurtle().z, 0, "aucun chantier lancé")
+	H.eq(fs.exists("ccquarry.save"), false, "aucune sauvegarde")
+end)
+
 -- ---------------------------------------------------------------------------
 -- Chantier complet
 -- ---------------------------------------------------------------------------

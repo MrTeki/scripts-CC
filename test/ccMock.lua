@@ -20,6 +20,7 @@ local M = {}
 
 local files, dirs, writeFaults, truncateFaults
 local world, entities, peripherals, gpsOrigin, ground, rednetState
+local httpRoutes, httpLog, httpEnabled
 local t                    -- état du turtle
 local clock, events, timers, nextTimer
 local screen
@@ -45,6 +46,7 @@ function M.reset(opts)
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
 	world, entities, peripherals, gpsOrigin, ground = {}, {}, {}, nil, {}
 	rednetState = { open = nil, sent = {}, inbox = {} }
+	httpRoutes, httpLog, httpEnabled = {}, {}, true
 	clock, events, timers, nextTimer = 0, {}, {}, 1
 	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
 	t = {
@@ -338,6 +340,18 @@ function M.setSlot(i, name, count)
 end
 
 function M.getTurtle() return t end
+
+--- Sert `body` à cette URL. `body = false` fait échouer la requête.
+function M.setUrl(url, body) httpRoutes[url] = body end
+
+--- URLs demandées, dans l'ordre. Sert à prouver qu'aucun accès réseau n'a lieu.
+function M.httpRequests() return httpLog end
+
+--- Coupe HTTP, comme un serveur qui l'a désactivé : http vaut alors nil.
+function M.disableHttp()
+	httpEnabled = false
+	_G.http = nil
+end
 
 --- Dépose un message rednet entrant, comme s'il venait d'un autre ordinateur.
 function M.rednetInject(id, message, protocol)
@@ -769,6 +783,19 @@ function M.install()
 	}
 	_G.sleep = os_.sleep
 	_G.parallel = parallel_
+	_G.http = {
+		get = function(url)
+			httpLog[#httpLog + 1] = url
+			local body = httpRoutes[url]
+			if body == nil then return nil, "404" end
+			if body == false then return nil, "Connection refused" end
+			local pos = 1
+			return {
+				readAll = function() local r = body:sub(pos) pos = #body + 1 return r end,
+				close = function() end,
+			}
+		end,
+	}
 	_G.rednet = {
 		open = function(side) rednetState.open = side or true end,
 		close = function() rednetState.open = nil end,
