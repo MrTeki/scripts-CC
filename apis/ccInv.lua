@@ -38,13 +38,26 @@ local DEFAULTS = {
 	fuelSlot = 1,      -- jamais vidé
 	chestSlot = 16,    -- jamais vidé
 
-	-- Noms reconnus comme coffre transportable. La version vanilla manquait
-	-- dans ccQuarry, qui ne connaissait que les identifiants EnderStorage.
+	-- Noms exacts reconnus comme coffre transportable.
 	chestNames = {
 		"EnderStorage:enderChest",
 		"enderstorage:ender_storage",
 		"enderstorage:ender_chest",
 		"minecraft:ender_chest",
+	},
+
+	-- Motifs de repli, cherchés dans l'identifiant en minuscules. Une liste de
+	-- noms exacts ne peut pas suivre les identifiants de tous les mods : c'est
+	-- ce qui faisait qu'un ender chest non prévu n'était pas reconnu du tout,
+	-- et que le butin partait au sol.
+	-- Seuls les conteneurs qui GARDENT leur contenu quand on les casse sont
+	-- éligibles : un coffre ordinaire éparpillerait tout à la reprise.
+	chestPatterns = {
+		"ender_chest",
+		"enderchest",
+		"ender_storage",
+		"enderstorage",
+		"shulker_box",
 	},
 
 	-- Rebut : jeté à la volée plutôt que rapporté. Vide par défaut, c'est à
@@ -186,11 +199,28 @@ end
 -- Coffre
 -- ---------------------------------------------------------------------------
 
+--- Ce nom désigne-t-il un coffre transportable ?
+function M.isChest(name)
+	if not name then return false end
+	for _, exact in ipairs(config.chestNames) do
+		if name == exact then return true end
+	end
+	local lowered = name:lower()
+	for _, pattern in ipairs(config.chestPatterns or {}) do
+		if lowered:find(pattern, 1, true) then return true end
+	end
+	return false
+end
+
 --- Slot contenant le coffre transportable, ou nil.
 -- Contrairement à SearchEnderChest, retourne bien nil quand il n'y en a pas,
 -- au lieu de conserver un index périmé.
 function M.findChest()
-	return (M.findAny(config.chestNames))
+	for slot = 1, SIZE do
+		local d = turtle.getItemDetail(slot)
+		if d and M.isChest(d.name) then return slot end
+	end
+	return nil
 end
 
 local PLACES = { forward = "place", up = "placeUp", down = "placeDown" }

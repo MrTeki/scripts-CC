@@ -98,6 +98,11 @@ local CONFIG = {
 	fuelMargin = 64,        -- carburant gardé en plus du trajet de retour
 	fuelTopUp = 2000,       -- visé lors d'un ravitaillement
 	trashWhere = "up",      -- le rebut part dans la couche déjà creusée
+
+	-- Sans coffre reconnu, la turtle ATTEND qu'on vienne vider son inventaire.
+	-- Mettre à true pour qu'elle dépose le butin au sol et continue : c'est
+	-- une perte assumée, jamais un comportement par défaut.
+	dropWhenNoChest = false,
 	trash = {
 		"minecraft:cobblestone",
 		"minecraft:stone",
@@ -122,6 +127,7 @@ local S = {
 	MINING      = "MINAGE",
 	RETURN_HOME = "RETOUR",
 	SERVICE     = "SERVICE",
+	AWAIT_HUMAN = "ATTENTE",
 	PAUSED      = "PAUSE",
 	FINISHING   = "FINITION",
 	DONE        = "TERMINE",
@@ -523,42 +529,64 @@ local function journalInventory()
 end
 
 STATES[S.SERVICE] = function()
-	local withChest = placeChest()
-
-	if withChest then
-		local ok, reason = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
-		if not ok then journal("Vidage : " .. tostring(reason)) end
+	if placeChest() then
+		local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
+		if not ok then
+			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
+		end
 
 		if ccFuel.level() < CONFIG.fuelTopUp then
 			local fine, why = ccFuel.refuelFromChest("down", CONFIG.fuelTopUp)
 			if not fine then journal("Carburant : " .. tostring(why)) end
 		end
-		ccInv.takeChest("down")
+
+		local taken, why = ccInv.takeChest("down")
+		if not taken then journal("Reprise du coffre : " .. tostring(why)) end
+
 	else
-		-- Sans coffre, on dépose devant soi et on attend du carburant à la main.
-		ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
+		-- Sans coffre : on brûle le combustible qu'on a, on se débarrasse du
+		-- rebut, et le reste du service dépend d'un humain.
 		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
+		ccInv.dumpTrash(CONFIG.trashWhere)
+		if CONFIG.dropWhenNoChest then
+			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
+		end
 	end
 
 	if ctx.reason == "abort" then return S.FINISHING end
 
-	-- Toujours à court après le service : on attend plutôt que de repartir
-	-- pour tomber en panne au fond du trou.
-	local besoin = ccFuel.reserve(ccPlan.cellAt(ctx.job, math.min(ctx.index, ccPlan.total(ctx.job))),
-		nil, CONFIG.fuelMargin)
-	if ccFuel.level() <= besoin then
-		-- Attente réveillée aussi par un minuteur, pour que les commandes
-		-- reçues entre-temps soient prises en compte.
-		journal("En attente de carburant")
-		local t = os.startTimer(5)
-		repeat
-			local e, id = os.pullEvent()
-		until e == "turtle_inventory" or (e == "timer" and id == t)
-		return S.SERVICE
+	-- On ne repart QUE si les deux conditions du retour sont levées. Repartir
+	-- sans place ou sans carburant, c'est retomber en panne au fond du trou.
+	if ccInv.freeCount() <= 1 then
+		journal("Inventaire plein : vider la turtle ou lui donner un coffre")
+		ctx.afterWait = S.SERVICE
+		return S.AWAIT_HUMAN
+	end
+
+	local cell = ccPlan.cellAt(ctx.job, math.min(ctx.index, ccPlan.total(ctx.job)))
+	if ccFuel.level() <= ccFuel.reserve(cell, nil, CONFIG.fuelMargin) then
+		journal("Carburant insuffisant : en fournir a la turtle")
+		ctx.afterWait = S.SERVICE
+		return S.AWAIT_HUMAN
 	end
 
 	ctx.reason = nil
 	return S.GO_TO_WORK
+end
+
+--- Attend une intervention humaine. C'est le comportement par DÉFAUT sans
+-- coffre reconnu : le butin d'une carrière ne doit pas partir au sol sans que
+-- ce soit demandé. Le réveil se fait sur un changement d'inventaire, et sur un
+-- minuteur pour que les commandes reçues entre-temps soient traitées.
+STATES[S.AWAIT_HUMAN] = function()
+	local timer = os.startTimer(5)
+	repeat
+		local event, id = os.pullEvent()
+	until event == "turtle_inventory" or (event == "timer" and id == timer)
+
+	-- La décision de repartir appartient à l'état qui a demandé l'attente :
+	-- lui seul connaît les conditions à revérifier.
+	return ctx.afterWait or S.SERVICE
 end
 
 STATES[S.PAUSED] = function()
@@ -577,14 +605,26 @@ STATES[S.FINISHING] = function()
 			end
 			local taken, why = ccInv.takeChest("down")
 			if not taken then journal("Reprise du coffre : " .. tostring(why)) end
-		else
+
+		elseif CONFIG.dropWhenNoChest then
 			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
+
+		else
+			-- Le chantier est fini mais la turtle tient encore du butin : elle
+			-- attend qu'on la vide plutôt que de l'abandonner au sol.
+			ccInv.dumpTrash(CONFIG.trashWhere)
+			if ccInv.freeCount() < 14 then
+				journal("Chantier fini : vider la turtle pour qu'elle s'arrete")
+				ctx.afterWait = S.FINISHING
+				return S.AWAIT_HUMAN
+			end
 		end
 		journalInventory()
 	end
 
 	store.delete()
 	removeStartup()
+	journal("Chantier termine")
 	return S.DONE
 end
 
@@ -682,13 +722,20 @@ local function machine()
 	while not ctx.stopped do
 		applyCommands()
 
-		local fn = STATES[ctx.state]
-		if not fn then
-			journal("Etat inconnu : " .. tostring(ctx.state))
-			ctx.state = S.FAILED
+		-- Les états terminaux se testent AVANT de chercher leur fonction :
+		-- ils n'en ont pas. Dans l'autre ordre, atteindre TERMINE produisait
+		-- « Etat inconnu : TERMINE » et transformait un chantier réussi en
+		-- échec.
+		if ctx.state == S.DONE or ctx.state == S.FAILED then
+			ctx.stopped = true
+			break
 		end
 
-		if ctx.state == S.DONE or ctx.state == S.FAILED then
+		local fn = STATES[ctx.state]
+		if not fn then
+			ctx.error = "etat inconnu : " .. tostring(ctx.state)
+			journal(ctx.error)
+			ctx.state = S.FAILED
 			ctx.stopped = true
 			break
 		end
@@ -743,8 +790,11 @@ local chestSlot = ccInv.findChest()
 if chestSlot then
 	journal("Coffre reconnu slot " .. chestSlot .. " : " .. ccInv.detail(chestSlot).name)
 else
-	journal("AUCUN coffre reconnu -- le butin ira au sol")
+	journal("AUCUN coffre reconnu -- la turtle attendra un vidage manuel")
 end
+-- Trace systématique : sans elle, un coffre non reconnu ne laisse aucune
+-- indication de l'identifiant qu'il aurait fallu accepter.
+journalInventory()
 
 save()
 

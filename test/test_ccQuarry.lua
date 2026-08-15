@@ -114,7 +114,15 @@ end)
 
 H.case("un chantier 2x2x3 est creusé en entier et la turtle rentre", function()
 	terrain({ width = 2, depth = 2, height = 3 })
-	run("2", "2", "3")
+	local sorties = run("2", "2", "3")
+
+	-- Ce contrôle-là manquait : les tests vérifiaient les EFFETS (volume
+	-- creusé, sauvegarde supprimée, startup restauré) sans jamais regarder
+	-- l'état final. Un chantier réussi était donc annoncé « ERREUR » sans
+	-- qu'aucun test ne s'en aperçoive.
+	local texte = table.concat(sorties, "\n")
+	H.contains(texte, "Carriere terminee", "bilan de réussite")
+	H.eq(texte:find("ERREUR", 1, true), nil, "aucune erreur signalée")
 
 	H.eq(restants(2, 2, 3), 0, "tout le volume est creusé")
 
@@ -129,10 +137,23 @@ end)
 
 H.case("un chantier plus grand, sur plusieurs couches", function()
 	terrain({ width = 3, depth = 2, height = 7 })
-	run("3", "2", "7")
+	local sorties = run("3", "2", "7")
 
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "bilan de réussite")
 	H.eq(restants(3, 2, 7), 0, "tout le volume est creusé")
 	H.eq(mock.getTurtle().z, 0, "revenue à la surface")
+end)
+
+H.case("le journal enregistre l'etat terminal, pas une fausse erreur", function()
+	-- Symptôme observé en jeu : « Etat inconnu : TERMINE ». La boucle
+	-- cherchait la fonction de l'état AVANT de tester s'il était terminal, or
+	-- TERMINE n'en a pas.
+	terrain({ width = 2, depth = 2, height = 3 })
+	run("2", "2", "3")
+
+	local trace = mock.getFile("ccquarry.log")
+	H.contains(trace, "Chantier termine", "fin normale tracée")
+	H.eq(trace:find("Etat inconnu", 1, true), nil, "aucun état inconnu")
 end)
 
 H.case("le rebut part au sol et n'engorge pas l'inventaire", function()

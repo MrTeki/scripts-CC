@@ -100,6 +100,36 @@ H.case("findChest reconnaît aussi l'ender chest vanilla", function()
 	H.eq(ccInv.findChest(), 5, "vanilla")
 end)
 
+H.case("findChest reconnaît un ender chest d'un mod imprévu", function()
+	-- Une liste de noms exacts ne peut pas suivre les identifiants de tous les
+	-- mods. En jeu, un ender chest non prévu n'était pas reconnu du tout, et
+	-- le butin partait au sol.
+	fresh()
+	for _, name in ipairs({
+		"enderchests:ender_chest",
+		"SomeMod:EnderChest",
+		"quark:pink_shulker_box",
+		"minecraft:shulker_box",
+	}) do
+		mock.install()
+		ccInv.reset()
+		mock.setSlot(4, name, 1)
+		H.eq(ccInv.findChest(), 4, name)
+	end
+end)
+
+H.case("findChest ignore ce qui n'est pas un conteneur transportable", function()
+	fresh()
+	-- Un coffre ordinaire éparpillerait son contenu quand on le casse : il ne
+	-- doit surtout pas servir au cycle poser / vider / reprendre.
+	for _, name in ipairs({ "minecraft:chest", "minecraft:barrel", "minecraft:cobblestone" }) do
+		mock.install()
+		ccInv.reset()
+		mock.setSlot(4, name, 1)
+		H.isNil(ccInv.findChest(), name)
+	end
+end)
+
 H.case("moveTo transfère et vide le slot source", function()
 	fresh()
 	mock.setSlot(4, "minecraft:coal", 30)
