@@ -92,6 +92,7 @@ local ccNet  = require("ccNet")
 
 local SAVE_PATH = "ccquarry.save"
 local SAVE_VERSION = 1
+local LOG_PATH = "ccquarry.log"
 
 local CONFIG = {
 	fuelMargin = 64,        -- carburant gardé en plus du trajet de retour
@@ -140,6 +141,23 @@ local ctx = {
 }
 
 local store
+
+-- ---------------------------------------------------------------------------
+-- Journal
+-- ---------------------------------------------------------------------------
+
+-- L'écran d'un turtle fait 13 lignes et se vide au premier nettoyage : un
+-- message d'erreur qui n'existe que là est perdu au moment où il sert. Tout
+-- passe donc aussi par un fichier, relisible après coup avec `edit ccquarry.log`.
+local function journal(msg)
+	msg = tostring(msg)
+	pcall(ccUi.log, msg)
+
+	local handle = fs.open(LOG_PATH, "a")
+	if not handle then return end
+	handle.write(("[%.1f] %s | %s\n"):format(os.clock(), ctx.state or "?", msg))
+	handle.close()
+end
 
 -- ---------------------------------------------------------------------------
 -- Fichier de démarrage
@@ -331,23 +349,23 @@ local function applyCommands()
 		if cmd == "pause" or cmd == "resume" then
 			if ctx.state == S.PAUSED then
 				ctx.state = ctx.resumeTo or S.MINING
-				ccUi.log("Reprise")
+				journal("Reprise")
 			else
 				ctx.resumeTo = ctx.state
 				ctx.state = S.PAUSED
-				ccUi.log("En pause")
+				journal("En pause")
 			end
 
 		elseif cmd == "refuel" then
 			-- On ne ravitaille pas ici : on demande un retour au coffre.
 			ctx.reason = "fuel"
 			ctx.state = S.RETURN_HOME
-			ccUi.log("Ravitaillement demande")
+			journal("Ravitaillement demande")
 
 		elseif cmd == "abort" or cmd == "home" then
 			ctx.reason = "abort"
 			ctx.state = S.RETURN_HOME
-			ccUi.log("Arret demande")
+			journal("Arret demande")
 		end
 	end
 end
@@ -381,9 +399,9 @@ STATES[S.CALIBRATE] = function()
 		local heading = ccNav.gpsHeading()
 		if heading then ccNav.setPosition({ x = ccNav.position().x, y = ccNav.position().y,
 			z = ccNav.position().z, dir = heading }) end
-		ccUi.log("Recale par GPS")
+		journal("Recale par GPS")
 	else
-		ccUi.log("Pas de GPS, suivi a l'estime")
+		journal("Pas de GPS, suivi a l'estime")
 	end
 	return S.GO_TO_WORK
 end
@@ -423,11 +441,11 @@ STATES[S.GO_TO_WORK] = function()
 	-- L'ancienne version mettait done = true sur un unique mouvement raté.
 	ctx.skips = ctx.skips + 1
 	ctx.streak = ctx.streak + 1
-	ccUi.log("Inatteignable : " .. tostring(block or reason))
+	journal("Inatteignable : " .. tostring(block or reason))
 
 	if ctx.streak >= ccPlan.perLayer(ctx.job) then
 		-- Une couche entière inatteignable : c'est le fond.
-		ccUi.log("Fond atteint")
+		journal("Fond atteint")
 		ctx.reason = "done"
 		return S.RETURN_HOME
 	end
@@ -470,7 +488,7 @@ STATES[S.RETURN_HOME] = function()
 
 	local ok, reason = ccNav.goTo({ x = 0, y = 0, z = 0, dir = 0 })
 	if not ok then
-		ccUi.log("Retour impossible : " .. tostring(reason))
+		journal("Retour impossible : " .. tostring(reason))
 		return S.FAILED
 	end
 	return ctx.reason == "done" and S.FINISHING or S.SERVICE
@@ -480,10 +498,28 @@ end
 local function placeChest()
 	local ok, reason = ccInv.placeChest("down")
 	if ok then return true end
-	if reason == "no_chest" then return false, reason end
 
+	if reason == "no_chest" then
+		journal("Aucun coffre reconnu en inventaire")
+		return false, reason
+	end
+
+	-- La case sous la turtle n'est pas libre : on la dégage et on réessaie.
 	ccNav.dig("down")
-	return ccInv.placeChest("down")
+	ok, reason = ccInv.placeChest("down")
+	if not ok then journal("Pose du coffre impossible : " .. tostring(reason)) end
+	return ok
+end
+
+--- Trace le contenu de l'inventaire, pour comprendre après coup ce qui a été
+--- gardé, jeté ou déposé.
+local function journalInventory()
+	local parts = {}
+	for slot = 1, 16 do
+		local d = ccInv.detail(slot)
+		if d then parts[#parts + 1] = slot .. ":" .. d.name .. "x" .. d.count end
+	end
+	journal("Inventaire " .. (#parts == 0 and "vide" or table.concat(parts, " ")))
 end
 
 STATES[S.SERVICE] = function()
@@ -491,11 +527,11 @@ STATES[S.SERVICE] = function()
 
 	if withChest then
 		local ok, reason = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
-		if not ok then ccUi.log("Vidage : " .. tostring(reason)) end
+		if not ok then journal("Vidage : " .. tostring(reason)) end
 
 		if ccFuel.level() < CONFIG.fuelTopUp then
 			local fine, why = ccFuel.refuelFromChest("down", CONFIG.fuelTopUp)
-			if not fine then ccUi.log("Carburant : " .. tostring(why)) end
+			if not fine then journal("Carburant : " .. tostring(why)) end
 		end
 		ccInv.takeChest("down")
 	else
@@ -513,7 +549,7 @@ STATES[S.SERVICE] = function()
 	if ccFuel.level() <= besoin then
 		-- Attente réveillée aussi par un minuteur, pour que les commandes
 		-- reçues entre-temps soient prises en compte.
-		ccUi.log("En attente de carburant")
+		journal("En attente de carburant")
 		local t = os.startTimer(5)
 		repeat
 			local e, id = os.pullEvent()
@@ -531,14 +567,22 @@ STATES[S.PAUSED] = function()
 end
 
 STATES[S.FINISHING] = function()
+	journalInventory()
+
 	if ccInv.freeCount() < 14 then
 		if placeChest() then
-			ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
-			ccInv.takeChest("down")
+			local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
+			if not ok then
+				journal("Vidage final : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
+			end
+			local taken, why = ccInv.takeChest("down")
+			if not taken then journal("Reprise du coffre : " .. tostring(why)) end
 		else
 			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
 		end
+		journalInventory()
 	end
+
 	store.delete()
 	removeStartup()
 	return S.DONE
@@ -640,7 +684,7 @@ local function machine()
 
 		local fn = STATES[ctx.state]
 		if not fn then
-			ccUi.log("Etat inconnu : " .. tostring(ctx.state))
+			journal("Etat inconnu : " .. tostring(ctx.state))
 			ctx.state = S.FAILED
 		end
 
@@ -652,7 +696,15 @@ local function machine()
 		local before = ctx.state
 		local ok, result = pcall(fn)
 		if not ok then
-			ccUi.log("Erreur : " .. tostring(result))
+			ctx.error = tostring(result)
+			journal("Erreur en " .. before .. " : " .. ctx.error)
+			ctx.state = S.FAILED
+		elseif result == nil then
+			-- Un état qui ne renvoie rien laisserait ctx.state à nil, et le
+			-- tour suivant échouerait sur « Etat inconnu : nil », sans dire
+			-- lequel des neuf états est fautif.
+			ctx.error = "l'etat " .. before .. " n'a renvoye aucun etat suivant"
+			journal(ctx.error)
 			ctx.state = S.FAILED
 		else
 			ctx.state = result
@@ -661,7 +713,7 @@ local function machine()
 		-- Pas de sauvegarde en état terminal : FINITION vient justement de
 		-- supprimer le fichier, la réécrire le ressusciterait.
 		if ctx.state ~= before and ctx.state ~= S.DONE and ctx.state ~= S.FAILED then
-			ccUi.log(ctx.state)
+			journal(ctx.state)
 			save()
 		end
 		draw()
@@ -684,6 +736,16 @@ if not setup(args) then return end
 setupUi()
 setupNet()
 ctx.drawTimer = os.startTimer(0.5)
+
+-- Diagnostic de départ : le coffre non reconnu est le piège le plus probable,
+-- puisque son identifiant dépend du mod installé.
+local chestSlot = ccInv.findChest()
+if chestSlot then
+	journal("Coffre reconnu slot " .. chestSlot .. " : " .. ccInv.detail(chestSlot).name)
+else
+	journal("AUCUN coffre reconnu -- le butin ira au sol")
+end
+
 save()
 
 parallel.waitForAny(machine, events)
@@ -693,5 +755,9 @@ if ctx.state == S.DONE then
 	print("Carriere terminee.")
 	if ctx.skips > 0 then print(ctx.skips .. " cellules inatteignables.") end
 else
+	-- Le message d'erreur est réaffiché APRÈS le nettoyage de l'écran : sinon
+	-- il disparaît exactement au moment où il sert.
 	print("Arret en etat " .. ctx.state .. ".")
+	if ctx.error then print(ctx.error) end
+	print("Journal complet : edit " .. LOG_PATH)
 end

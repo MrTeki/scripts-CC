@@ -143,6 +143,33 @@ H.case("le rebut part au sol et n'engorge pas l'inventaire", function()
 	H.ok(mock.groundCount("minecraft:stone") > 40, "la pierre a été jetée")
 end)
 
+H.case("une erreur d'etat est affichee, pas effacee par le nettoyage d'ecran", function()
+	-- ccUi.clear() était appelé avant le bilan et effaçait le message écrit en
+	-- ligne 13 : l'utilisateur voyait « Arret en ERREUR » et rien d'autre.
+	terrain({ width = 2, depth = 2, height = 3 })
+	-- On casse la reprise du coffre pour provoquer une erreur en FINITION.
+	local vrai = turtle.digDown
+	turtle.digDown = function() error("panne simulee de digDown", 0) end
+
+	local sorties = run("2", "2", "3")
+	turtle.digDown = vrai
+
+	local texte = table.concat(sorties, "\n")
+	H.contains(texte, "ERREUR", "etat final")
+	H.contains(texte, "panne simulee", "le message d'erreur est visible")
+	H.contains(texte, "ccquarry.log", "le journal est signale")
+end)
+
+H.case("le journal conserve la trace apres coup", function()
+	terrain({ width = 2, depth = 2, height = 3 })
+	run("2", "2", "3")
+
+	local trace = mock.getFile("ccquarry.log")
+	H.ok(trace, "le journal existe")
+	H.contains(trace, "Coffre reconnu", "diagnostic du coffre au demarrage")
+	H.contains(trace, "FINITION", "les transitions d'etat y figurent")
+end)
+
 -- ---------------------------------------------------------------------------
 -- Obstacles
 -- ---------------------------------------------------------------------------
