@@ -65,6 +65,45 @@ function M.isFuel()
 	return turtle.refuel(0)
 end
 
+--- Slots contenant du combustible, dans l'ordre.
+-- ccInv ne peut pas répondre à cette question : reconnaître un combustible
+-- demande turtle.refuel(0), et ccFuel dépend déjà de ccInv.
+function M.fuelSlots()
+	local out = {}
+	for slot = 1, 16 do
+		if turtle.getItemCount(slot) > 0 then
+			turtle.select(slot)
+			if M.isFuel() then out[#out + 1] = slot end
+		end
+	end
+	return out
+end
+
+--- Slot de combustible le plus fourni, ou nil.
+function M.bestFuelSlot()
+	local best, count = nil, 0
+	for _, slot in ipairs(M.fuelSlots()) do
+		local n = turtle.getItemCount(slot)
+		if n > count then best, count = slot, n end
+	end
+	return best
+end
+
+--- Slots à préserver lors d'un vidage, pour garder `keep` unités de
+--- combustible. Le reste part au coffre : le charbon est aussi du butin, et
+--- tout garder reviendrait à ne jamais le déposer.
+-- @return { [slot] = true }, total conservé
+function M.protectSlots(keep)
+	keep = keep or 64
+	local set, total = {}, 0
+	for _, slot in ipairs(M.fuelSlots()) do
+		if total >= keep then break end
+		set[slot] = true
+		total = total + turtle.getItemCount(slot)
+	end
+	return set, total
+end
+
 --- Brûle depuis le slot sélectionné jusqu'à atteindre `target`.
 -- @return nombre d'objets restant dans le slot
 function M.burnUpTo(target)
@@ -143,6 +182,7 @@ function M.refuelFromChest(where, target, opts)
 	local fuelSlot = ccInv.config().fuelSlot
 
 	local borrowed = {}     -- slots empruntés, DANS L'ORDRE D'ASPIRATION
+	local kept = {}         -- slots de combustible conservé
 	local sawFuel = false
 
 	while M.level() < target and #borrowed < scratch do
@@ -154,12 +194,11 @@ function M.refuelFromChest(where, target, opts)
 			sawFuel = true
 			M.burnUpTo(target)
 			if turtle.getItemCount(slot) > 0 then
-				-- Reste de combustible : on le garde en réserve plutôt que de
-				-- le rendre. Les ravitaillements suivants n'auront plus besoin
-				-- du coffre.
-				if not ccInv.moveTo(slot, fuelSlot) then
-					borrowed[#borrowed + 1] = slot
-				end
+				-- Reste de combustible : on le garde plutôt que de le rendre.
+				-- Le rangement à l'emplacement canonique attend la fin : y
+				-- toucher maintenant DÉPLACERAIT une pile empruntée, et la
+				-- restitution rendrait alors le mauvais slot.
+				kept[#kept + 1] = slot
 			end
 		else
 			-- LE point de la correction : le rebut est RETENU. L'ancien code le
@@ -173,6 +212,9 @@ function M.refuelFromChest(where, target, opts)
 		local ok, reason = ccInv.dropTo(where, borrowed[i])
 		if not ok then return false, reason end
 	end
+
+	-- Le rebut est rendu : plus aucun indice à préserver, on peut ranger.
+	for _, slot in ipairs(kept) do ccInv.moveToSlot(slot, fuelSlot) end
 
 	if M.level() >= target then return true end
 	return false, sawFuel and "not_enough_fuel" or "no_fuel_found"

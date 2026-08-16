@@ -20,49 +20,46 @@ end
 -- Slots réservés
 -- ---------------------------------------------------------------------------
 
-H.case("les slots réservés sont exclus du décompte de places libres", function()
+H.case("un emplacement canonique laissé vide compte comme libre", function()
+	-- L'ancienne version excluait les slots 1 et 16 du décompte, même vides et
+	-- inutilisés : deux slots perdus pour rien.
 	fresh()
+	H.eq(ccInv.freeCount(), 16, "inventaire vide")
+	H.eq(ccInv.firstFree(), 1, "le slot 1 est utilisable")
+
 	mock.setSlot(1, "minecraft:coal", 64)
 	mock.setSlot(16, ENDER, 1)
-
-	-- 16 slots, 2 réservés, 14 disponibles.
-	H.eq(ccInv.freeCount(), 14, "au départ")
-	H.eq(ccInv.reservedCount(), 2, "slots réservés")
+	H.eq(ccInv.freeCount(), 14, "deux slots occupés")
 
 	fillSlots(14)
-	-- C'est ici que ccQuarry perdait des blocs : son seuil `items > 14` laissait
-	-- deux slots, occupés par le carburant et le coffre, donc zéro de libre.
 	H.eq(ccInv.freeCount(), 0, "inventaire plein")
 end)
 
-H.case("firstFree saute les slots réservés, sauf demande explicite", function()
+H.case("un emplacement canonique vide se fait occuper par le butin", function()
+	-- Le jeu ne réserve rien : turtle.dig() range dans le premier slot libre.
+	-- C'est précisément pourquoi la protection doit dépendre du CONTENU.
 	fresh()
-	mock.setSlot(2, "minecraft:cobblestone", 64)
-
-	H.eq(ccInv.firstFree(), 3, "slot 1 réservé, slot 2 occupé")
-	H.eq(ccInv.firstFree(true), 1, "réservés inclus")
-end)
-
-H.case("un slot réservé LAISSÉ VIDE se fait occuper par le butin", function()
-	-- Le jeu ne réserve rien : turtle.dig() range dans le premier slot libre,
-	-- slot 1 compris. La réservation n'est qu'une convention du script, elle
-	-- ne tient que tant que le slot reste occupé.
-	fresh()
-	H.eq(ccInv.count(1), 0, "slot carburant vide au départ")
-
 	mock.setBlock(1, 0, 0, "minecraft:stone")
 	turtle.dig()
 
-	H.eq(ccInv.count(1), 1, "le butin a bien atterri dans le slot réservé")
-	-- Conséquence pratique : ccQuarry doit garder du carburant en slot 1 dès
-	-- le départ, et ccFuel y remettre le reliquat après chaque ravitaillement.
+	H.eq(ccInv.count(1), 1, "le butin y atterrit")
+	-- Et il en repart au vidage : aucun numéro de slot n'est protégé.
+	H.eq(ccInv.lootCount(), 1, "compté comme du butin")
 end)
 
-H.case("isReserved", function()
+H.case("lootCount ne compte ni le coffre ni les slots protégés", function()
+	-- Remplace les seuils fondés sur le nombre de slots libres, qui
+	-- dépendaient du nombre de slots réservés et devenaient faux dès qu'on y
+	-- touchait.
 	fresh()
-	H.eq(ccInv.isReserved(1), true, "carburant")
-	H.eq(ccInv.isReserved(16), true, "coffre")
-	H.eq(ccInv.isReserved(8), false, "slot ordinaire")
+	mock.setSlot(1, "minecraft:coal", 64)
+	mock.setSlot(16, ENDER, 1)
+	mock.setSlot(3, "minecraft:diamond", 2)
+	mock.setSlot(4, "minecraft:cobblestone", 64)
+
+	H.eq(ccInv.lootCount(), 3, "sans protection : seul le coffre est exclu")
+	H.eq(ccInv.lootCount({ [1] = true }), 2, "carburant protégé")
+	H.eq(ccInv.lootCount({ [1] = true, [3] = true, [4] = true }), 0, "tout protégé")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -162,23 +159,89 @@ H.case("depotAt inspecte au lieu de tenter un dépôt", function()
 	H.eq(name, "minecraft:chest", "nom remonté")
 end)
 
-H.case("moveTo transfère et vide le slot source", function()
+H.case("compact regroupe les piles partielles d'un même objet", function()
+	-- Le butin miné atterrit dans le slot SÉLECTIONNÉ, et chaque opération
+	-- déplace cette sélection : on se retrouve avec plusieurs piles partielles
+	-- du même bloc, qui occupent des slots pour rien.
+	fresh()
+	mock.setSlot(2, "minecraft:cobblestone", 30)
+	mock.setSlot(5, "minecraft:cobblestone", 20)
+	mock.setSlot(9, "minecraft:cobblestone", 14)
+	mock.setSlot(3, "minecraft:iron_ore", 4)
+
+	H.eq(ccInv.freeCount(), 12, "quatre slots occupés au départ")
+	ccInv.compact()
+
+	H.eq(ccInv.count(2), 64, "les trois piles n'en font plus qu'une")
+	H.eq(ccInv.count(5), 0, "slot libéré")
+	H.eq(ccInv.count(9), 0, "slot libéré")
+	H.eq(ccInv.count(3), 4, "le minerai n'a pas bougé")
+	H.eq(ccInv.freeCount(), 14, "deux slots récupérés")
+end)
+
+H.case("compact déborde correctement au-delà d'une pile pleine", function()
+	fresh()
+	mock.setSlot(2, "minecraft:cobblestone", 50)
+	mock.setSlot(4, "minecraft:cobblestone", 50)
+
+	ccInv.compact()
+	H.eq(ccInv.count(2), 64, "première pile pleine")
+	H.eq(ccInv.count(4), 36, "le reste demeure")
+	H.eq(ccInv.freeCount(), 14, "aucun slot perdu ni gagné")
+end)
+
+H.case("compact ne mélange jamais deux objets différents", function()
+	fresh()
+	mock.setSlot(2, "minecraft:coal", 10)
+	mock.setSlot(3, "minecraft:charcoal", 10)
+
+	ccInv.compact()
+	H.eq(ccInv.count(2), 10, "charbon intact")
+	H.eq(ccInv.count(3), 10, "charbon de bois intact")
+end)
+
+H.case("moveToSlot transfère et vide le slot source", function()
 	fresh()
 	mock.setSlot(4, "minecraft:coal", 30)
 
-	H.ok(ccInv.moveTo(4, 1), "transfert")
+	H.ok(ccInv.moveToSlot(4, 1), "transfert")
 	H.eq(ccInv.count(4), 0, "source vidée")
 	H.eq(ccInv.count(1), 30, "destination")
 end)
 
-H.case("moveTo échoue sans écraser quand la destination diffère", function()
+H.case("moveToSlot déplace l'occupant au lieu de renoncer", function()
+	-- C'est ce qui permet au carburant de regagner son emplacement quand du
+	-- butin l'a squatté. L'ancienne version se contentait d'échouer, et
+	-- l'emplacement restait occupé pour toute la session.
 	fresh()
 	mock.setSlot(4, "minecraft:coal", 30)
-	mock.setSlot(1, "minecraft:charcoal", 5)
+	mock.setSlot(1, "minecraft:cobblestone", 5)
 
-	H.eq(ccInv.moveTo(4, 1), false, "refus")
+	H.ok(ccInv.moveToSlot(4, 1), "déplacement")
+	H.eq(ccInv.count(1), 30, "le carburant a pris la place")
+	H.eq(ccInv.find("minecraft:cobblestone") ~= nil, true, "le squatteur est ailleurs, pas détruit")
+	H.eq(ccInv.count(4), 0, "source vidée")
+end)
+
+H.case("moveToSlot fusionne quand c'est le même objet", function()
+	fresh()
+	mock.setSlot(4, "minecraft:coal", 30)
+	mock.setSlot(1, "minecraft:coal", 5)
+
+	H.ok(ccInv.moveToSlot(4, 1), "fusion")
+	H.eq(ccInv.count(1), 35, "piles regroupées")
+	H.eq(ccInv.count(4), 0, "source vidée")
+end)
+
+H.case("moveToSlot échoue proprement sans place où évacuer", function()
+	fresh()
+	for slot = 1, 16 do mock.setSlot(slot, "minecraft:cobblestone", 64) end
+	mock.setSlot(4, "minecraft:coal", 30)
+
+	local ok, reason = ccInv.moveToSlot(4, 1)
+	H.eq(ok, false, "échec")
+	H.eq(reason, "inventory_full", "raison")
 	H.eq(ccInv.count(4), 30, "source intacte")
-	H.eq(ccInv.count(1), 5, "destination intacte")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -187,8 +250,8 @@ end)
 
 H.case("dumpTrash jette le rebut et épargne le reste", function()
 	fresh({ trash = { "minecraft:cobblestone", "minecraft:dirt" } })
-	mock.setSlot(1, "minecraft:coal", 64)          -- réservé
-	mock.setSlot(16, ENDER, 1)                     -- réservé
+	mock.setSlot(1, "minecraft:coal", 64)
+	mock.setSlot(16, ENDER, 1)
 	mock.setSlot(2, "minecraft:cobblestone", 64)
 	mock.setSlot(3, "minecraft:diamond", 3)
 	mock.setSlot(4, "minecraft:dirt", 40)
@@ -199,7 +262,7 @@ H.case("dumpTrash jette le rebut et épargne le reste", function()
 	H.eq(ccInv.count(4), 0, "terre jetée")
 	H.eq(ccInv.count(3), 3, "diamant conservé")
 	H.eq(ccInv.count(5), 12, "minerai conservé")
-	H.eq(ccInv.count(1), 64, "carburant conservé")
+	H.eq(ccInv.count(1), 64, "carburant conservé : le rebut ne le concerne pas")
 	H.eq(ccInv.count(16), 1, "coffre conservé")
 
 	H.eq(mock.groundCount("minecraft:cobblestone"), 64, "cobble au sol")
@@ -214,7 +277,7 @@ H.case("liste de rebut vide : rien n'est jeté", function()
 	H.eq(ccInv.count(2), 64, "cobble conservé")
 end)
 
-H.case("le rebut ne touche jamais le coffre, même hors slot réservé", function()
+H.case("le rebut ne touche jamais le coffre, où qu il soit", function()
 	fresh({ trash = { "minecraft:cobblestone" } })
 	mock.setSlot(5, ENDER, 1)
 	mock.setSlot(2, "minecraft:cobblestone", 64)
@@ -275,7 +338,7 @@ H.case("dropTo sur un coffre plein : container_full, sans boucler", function()
 	H.eq(ccInv.count(2), 64, "rien n'a été déposé")
 end)
 
-H.case("unload vide tout sauf les slots réservés et le coffre", function()
+H.case("unload épargne le coffre et les slots désignés, rien d'autre", function()
 	fresh()
 	mock.setChest(0, 0, -1, {}, 27)
 	mock.setSlot(1, "minecraft:coal", 64)
@@ -283,12 +346,38 @@ H.case("unload vide tout sauf les slots réservés et le coffre", function()
 	mock.setSlot(2, "minecraft:cobblestone", 64)
 	mock.setSlot(3, "minecraft:diamond", 5)
 
-	H.ok(ccInv.unload("down"), "vidage")
+	H.ok(ccInv.unload("down", { protect = { [1] = true } }), "vidage")
 	H.eq(ccInv.count(2), 0, "cobble déposé")
 	H.eq(ccInv.count(3), 0, "diamant déposé")
-	H.eq(ccInv.count(1), 64, "carburant conservé")
-	H.eq(ccInv.count(16), 1, "coffre conservé")
-	H.eq(ccInv.freeCount(), 14, "tous les slots libres")
+	H.eq(ccInv.count(1), 64, "carburant conservé, parce que DÉSIGNÉ")
+	H.eq(ccInv.count(16), 1, "coffre conservé, reconnu par ccInv")
+	H.eq(ccInv.lootCount({ [1] = true }), 0, "plus rien à déposer")
+end)
+
+H.case("sans désignation, le carburant part au coffre comme le reste", function()
+	-- Le point de bascule : le slot 1 n'est plus sacré. C'est ce qui permet
+	-- au butin qui l'a squatté d'en repartir -- et ce qui impose à ccQuarry de
+	-- désigner explicitement le combustible à garder.
+	fresh()
+	mock.setChest(0, 0, -1, {}, 27)
+	mock.setSlot(1, "minecraft:coal", 64)
+
+	H.ok(ccInv.unload("down"), "vidage")
+	H.eq(ccInv.count(1), 0, "slot 1 vidé, faute d'être désigné")
+end)
+
+H.case("du butin ayant squatté l'emplacement du carburant en repart", function()
+	-- Le symptôme observé en jeu : un slot canonique laissé vide se remplit en
+	-- minant, puis n'était JAMAIS vidé. Un slot perdu pour toute la session.
+	fresh()
+	mock.setChest(0, 0, -1, {}, 27)
+	mock.setSlot(1, "minecraft:cobblestone", 64)   -- squatte l'emplacement
+	mock.setSlot(5, "minecraft:coal", 32)          -- le vrai carburant
+
+	-- ccQuarry désigne le slot qui contient RÉELLEMENT du combustible.
+	H.ok(ccInv.unload("down", { protect = { [5] = true } }), "vidage")
+	H.eq(ccInv.count(1), 0, "le cobble squatteur est parti")
+	H.eq(ccInv.count(5), 32, "le carburant est resté")
 end)
 
 H.case("unload jette le rebut au lieu de l'entreposer", function()

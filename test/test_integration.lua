@@ -101,7 +101,7 @@ H.case("cycle complet : miner, rentrer, vider, ravitailler, repartir", function(
 
 	-- Phase de minage : on descend, l'inventaire se remplit de pierre.
 	for _ = 1, 5 do H.ok(ccNav.down(), "descente") end
-	H.ok(ccInv.freeCount() < 14, "l'inventaire s'est rempli")
+	H.ok(ccInv.freeCount() < 16, "l'inventaire s'est rempli")
 	H.eq(ccInv.count(1), reserveAvant, "le butin n'a pas pollué le slot carburant")
 	local profondeur = ccNav.position().z
 
@@ -111,8 +111,10 @@ H.case("cycle complet : miner, rentrer, vider, ravitailler, repartir", function(
 
 	-- Le coffre se pose sous la turtle, dans le puits qu'elle vient de creuser.
 	mock.setChest(0, 0, -1, contenu, 27)
-	H.ok(ccInv.unload("down"), "vidage")
-	H.eq(ccInv.freeCount(), 14, "inventaire vidé")
+	-- Le carburant est DÉSIGNÉ : aucun numéro de slot n'est protégé en soi.
+	H.ok(ccInv.unload("down", { protect = ccFuel.protectSlots(64) }), "vidage")
+	H.eq(ccInv.lootCount(ccFuel.protectSlots(64)), 0, "plus rien à déposer")
+	H.ok(ccInv.count(1) > 0, "le carburant est resté")
 
 	local avant = ccFuel.level()
 	H.ok(ccFuel.refuelFromChest("down", avant + 200), "ravitaillement")

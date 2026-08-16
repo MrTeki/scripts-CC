@@ -1,33 +1,32 @@
--- ccInv : inventaire du turtle, slots réservés, et interaction avec le coffre.
+-- ccInv : inventaire du turtle, coffres, et mise au rebut.
 --
 -- Remplace getItemList (ccStairs), getTurtleInventory (ccFarm), findEmptySlot
 -- (ccChopper, ccStairs), findItemSlotInTurtleInventory et clearTurtleInventory
 -- (ccChopper), SearchEnderChest et Unload (ccQuarry).
 --
--- Quatre corrections par rapport à l'existant :
+-- PRINCIPE : la protection d'un slot dépend de ce qu'il CONTIENT, jamais de
+-- son numéro.
 --
---   1. Slots réservés déclarés. ccQuarry décidait de vider sur des constantes
---      magiques : `items > 14` pour partir vider, `items > 2` pour considérer
---      le vidage terminé. Or le carburant et le coffre occupent deux slots :
---      à 14 slots pleins il n'en restait aucun de libre, et les blocs minés
---      tombaient par terre. Et `items > 2` restait vrai dès qu'un troisième
---      objet non déposable traînait, ce qui bouclait dans `while
---      needClearInventory do Unload() end`.
+-- La première version réservait les slots 1 et 16 en permanence. Quatre
+-- défauts, tous issus de cette seule confusion :
 --
---   2. Pose du coffre VÉRIFIÉE. ccQuarry faisait `turtle.placeUp()` sans
---      regarder le retour, puis marquait le coffre comme posé. Si la pose
---      échouait, tout l'inventaire partait au sol.
+--   * Un slot réservé laissé vide se remplissait en minant -- le jeu ne
+--     protège rien -- puis n'était jamais vidé, puisque le vidage sautait les
+--     slots réservés. Un slot perdu pour toute la session.
+--   * Pire : avec du cobble dans le slot 1, le vidage protégeait le cobble et
+--     jetait le carburant, qui se trouvait ailleurs. Exactement l'inverse de
+--     l'intention.
+--   * Les slots réservés étaient exclus du décompte des places libres, même
+--     vides et inutilisés.
+--   * Rien ne remettait jamais les choses à leur place.
 --
---   3. Coffre introuvable remis à nil. SearchEnderChest ne réinitialisait
---      jamais son index : un coffre perdu laissait le script sélectionner un
---      slot arbitraire, poser du cobble et jeter le butin dessus.
+-- Désormais : fuelSlot et chestSlot ne sont que des emplacements CANONIQUES,
+-- où tidy range les choses. Ce qui est protégé au vidage, c'est le slot qui
+-- contient réellement le coffre, plus ceux que l'appelant désigne.
 --
---   4. Dépôt à échecs bornés. `while turtle.getItemCount(i) > 0 and not
---      turtle.dropUp() do end` bouclait sans fin sur un coffre plein.
---
--- La liste de rebut est la nouveauté : jeter cobble, terre et gravier à la
--- volée divise le nombre de trajets de vidage, et donc la fréquence des
--- ravitaillements dans un coffre encombré.
+-- ccInv ne sait pas reconnaître un combustible -- cela demande turtle.refuel(0),
+-- qui appartient à ccFuel, lequel dépend déjà de ccInv. L'appelant fournit
+-- donc l'ensemble des slots à préserver.
 
 local M = { _VERSION = 1 }
 
@@ -35,8 +34,10 @@ local SIZE = 16
 local MAX_STACK = 64
 
 local DEFAULTS = {
-	fuelSlot = 1,      -- jamais vidé
-	chestSlot = 16,    -- jamais vidé
+	-- Emplacements canoniques : là où tidy range le carburant et le coffre.
+	-- Ce ne sont PAS des slots interdits au butin.
+	fuelSlot = 1,
+	chestSlot = 16,
 
 	-- Noms exacts reconnus comme coffre transportable.
 	chestNames = {
@@ -47,34 +48,18 @@ local DEFAULTS = {
 	},
 
 	-- Motifs de repli, cherchés dans l'identifiant en minuscules. Une liste de
-	-- noms exacts ne peut pas suivre les identifiants de tous les mods : c'est
-	-- ce qui faisait qu'un ender chest non prévu n'était pas reconnu du tout.
-	--
+	-- noms exacts ne peut pas suivre les identifiants de tous les mods.
 	-- Ne concerne QUE le coffre transportable, celui que la turtle emporte,
 	-- pose, vide et reprend. Seuls les conteneurs qui gardent leur contenu
-	-- quand on les casse sont éligibles : un coffre ordinaire éparpillerait
-	-- tout à la reprise.
+	-- quand on les casse sont éligibles.
 	chestPatterns = {
-		"ender_chest",
-		"enderchest",
-		"ender_storage",
-		"enderstorage",
-		"shulker_box",
+		"ender_chest", "enderchest", "ender_storage", "enderstorage", "shulker_box",
 	},
 
 	-- Conteneurs FIXES, posés dans le monde et jamais cassés par la turtle.
 	-- N'importe quel inventaire fait l'affaire, puisqu'on ne fait qu'y déposer.
-	depotPatterns = {
-		"chest",
-		"barrel",
-		"shulker",
-		"hopper",
-		"drawer",
-		"crate",
-	},
+	depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate" },
 
-	-- Rebut : jeté à la volée plutôt que rapporté. Vide par défaut, c'est à
-	-- l'appelant d'assumer la perte.
 	trash = {},
 }
 
@@ -97,10 +82,9 @@ end
 function M.config() return config end
 
 -- ---------------------------------------------------------------------------
--- Lecture de l'inventaire
+-- Lecture
 -- ---------------------------------------------------------------------------
 
---- Contenu des 16 slots. Les slots vides valent nil.
 function M.list()
 	local out = {}
 	for slot = 1, SIZE do out[slot] = turtle.getItemDetail(slot) end
@@ -108,39 +92,27 @@ function M.list()
 end
 
 function M.count(slot) return turtle.getItemCount(slot) end
-
 function M.detail(slot) return turtle.getItemDetail(slot) end
 
-function M.isReserved(slot)
-	return slot == config.fuelSlot or slot == config.chestSlot
-end
-
---- Premier slot libre.
--- @param includeReserved  si vrai, les slots réservés sont éligibles
-function M.firstFree(includeReserved)
+--- Premier slot vide, ou nil. Tous les slots sont éligibles : aucun n'est
+--- interdit au butin.
+function M.firstFree()
 	for slot = 1, SIZE do
-		if (includeReserved or not M.isReserved(slot)) and turtle.getItemCount(slot) == 0 then
-			return slot
-		end
+		if turtle.getItemCount(slot) == 0 then return slot end
 	end
 	return nil
 end
 
---- Nombre de slots libres, hors slots réservés.
+--- Nombre de slots vides. Un emplacement canonique inutilisé compte comme
+--- libre : le refuser reviendrait à gaspiller un slot pour rien.
 function M.freeCount()
 	local n = 0
 	for slot = 1, SIZE do
-		if not M.isReserved(slot) and turtle.getItemCount(slot) == 0 then n = n + 1 end
+		if turtle.getItemCount(slot) == 0 then n = n + 1 end
 	end
 	return n
 end
 
---- Nombre de slots réservés effectivement immobilisés.
-function M.reservedCount()
-	return config.fuelSlot == config.chestSlot and 1 or 2
-end
-
---- Slot contenant `name`, ou nil.
 function M.find(name)
 	for slot = 1, SIZE do
 		local d = turtle.getItemDetail(slot)
@@ -149,8 +121,6 @@ function M.find(name)
 	return nil
 end
 
---- Premier slot contenant l'un des noms donnés.
--- @return slot, nom  ou nil
 function M.findAny(names)
 	for slot = 1, SIZE do
 		local d = turtle.getItemDetail(slot)
@@ -163,56 +133,81 @@ function M.findAny(names)
 	return nil
 end
 
---- Déplace le contenu de `from` vers `to`. Retourne true si tout a été déplacé.
-function M.moveTo(from, to)
-	if from == to then return true end
-	local n = turtle.getItemCount(from)
-	if n == 0 then return true end
-	turtle.select(from)
-	turtle.transferTo(to, n)
-	return turtle.getItemCount(from) == 0
-end
-
 -- ---------------------------------------------------------------------------
--- Rebut
+-- Rangement
 -- ---------------------------------------------------------------------------
 
-function M.isTrash(name)
-	if not name then return false end
-	for _, t in ipairs(config.trash) do
-		if t == name then return true end
-	end
-	return false
-end
-
---- Jette tout le rebut par-dessus bord.
--- Les slots réservés sont épargnés, ainsi que le coffre s'il est en main.
--- @param where  "forward" (défaut), "up" ou "down"
--- @return nombre de slots vidés
-local DROPS = { forward = "drop", up = "dropUp", down = "dropDown" }
-
-function M.dumpTrash(where)
-	local fn = DROPS[where or "forward"]
-	local chest = M.findChest()
-	local emptied = 0
-
-	for slot = 1, SIZE do
-		if not M.isReserved(slot) and slot ~= chest then
-			local d = turtle.getItemDetail(slot)
-			if d and M.isTrash(d.name) then
-				turtle.select(slot)
-				if turtle[fn]() then emptied = emptied + 1 end
+--- Regroupe les piles partielles d'un même objet.
+--
+-- Le butin miné atterrit dans le slot SÉLECTIONNÉ, et chaque opération
+-- (dépôt, ravitaillement, pose de coffre) déplace cette sélection. Sans
+-- regroupement, on se retrouve avec plusieurs piles partielles du même bloc,
+-- qui occupent des slots pour rien et déclenchent un vidage prématuré.
+-- @return nombre de transferts effectués
+function M.compact()
+	local moves = 0
+	for target = 1, SIZE - 1 do
+		local d = turtle.getItemDetail(target)
+		if d and d.count < MAX_STACK then
+			for source = target + 1, SIZE do
+				local s = turtle.getItemDetail(source)
+				if s and s.name == d.name then
+					turtle.select(source)
+					turtle.transferTo(target)
+					moves = moves + 1
+					d = turtle.getItemDetail(target)
+					if not d or d.count >= MAX_STACK then break end
+				end
 			end
 		end
 	end
-	return emptied
+	return moves
+end
+
+--- Déplace le contenu de `from` vers `to`, en libérant `to` si nécessaire.
+-- @return true, ou false + raison
+function M.moveToSlot(from, to)
+	if from == to then return true end
+	if turtle.getItemCount(from) == 0 then return true end
+
+	local dest = turtle.getItemDetail(to)
+	if dest then
+		local src = turtle.getItemDetail(from)
+		if not (src and dest.name == src.name) then
+			-- Occupé par autre chose : on l'évacue vers un slot libre.
+			local spare = M.firstFree()
+			if not spare then return false, "inventory_full" end
+			turtle.select(to)
+			turtle.transferTo(spare)
+			if turtle.getItemCount(to) > 0 then return false, "transfer_failed" end
+		end
+	end
+
+	turtle.select(from)
+	turtle.transferTo(to)
+	return turtle.getItemCount(from) == 0
+end
+
+--- Range le coffre et le carburant à leurs emplacements canoniques.
+-- @param fuelSlot  slot contenant le carburant à préserver (fourni par ccFuel)
+-- @return true
+function M.tidy(fuelSlot)
+	M.compact()
+
+	local chest = M.findChest()
+	if chest then M.moveToSlot(chest, config.chestSlot) end
+
+	-- Relu APRÈS le déplacement du coffre, qui a pu tout décaler.
+	if fuelSlot and turtle.getItemCount(fuelSlot) > 0 then
+		M.moveToSlot(fuelSlot, config.fuelSlot)
+	end
+	return true
 end
 
 -- ---------------------------------------------------------------------------
--- Coffre
+-- Coffres
 -- ---------------------------------------------------------------------------
 
---- Ce nom désigne-t-il un coffre transportable ?
 function M.isChest(name)
 	if not name then return false end
 	for _, exact in ipairs(config.chestNames) do
@@ -226,8 +221,6 @@ function M.isChest(name)
 end
 
 --- Slot contenant le coffre transportable, ou nil.
--- Contrairement à SearchEnderChest, retourne bien nil quand il n'y en a pas,
--- au lieu de conserver un index périmé.
 function M.findChest()
 	for slot = 1, SIZE do
 		local d = turtle.getItemDetail(slot)
@@ -239,9 +232,9 @@ end
 local PLACES   = { forward = "place",   up = "placeUp",   down = "placeDown" }
 local DIGS     = { forward = "dig",     up = "digUp",     down = "digDown" }
 local SUCKS    = { forward = "suck",    up = "suckUp",    down = "suckDown" }
+local DROPS    = { forward = "drop",    up = "dropUp",    down = "dropDown" }
 local INSPECTS = { forward = "inspect", up = "inspectUp", down = "inspectDown" }
 
---- Ce nom désigne-t-il un conteneur fixe, où l'on peut déposer ?
 function M.isDepot(name)
 	if not name then return false end
 	local lowered = name:lower()
@@ -256,7 +249,6 @@ end
 -- il n'y a rien en face, en faisant simplement tomber l'objet au sol. Sans
 -- cette vérification, « déposer dans le coffre » et « perdre son butin » sont
 -- indiscernables.
--- @return present, nom du bloc
 function M.depotAt(where)
 	local seen, info = turtle[INSPECTS[where or "forward"]]()
 	if not seen or not info then return false end
@@ -264,7 +256,6 @@ function M.depotAt(where)
 end
 
 --- Pose le coffre, en vérifiant que la pose a réussi.
--- @return true, ou false + raison
 function M.placeChest(where)
 	local slot = M.findChest()
 	if not slot then return false, "no_chest" end
@@ -276,26 +267,23 @@ function M.placeChest(where)
 	return true
 end
 
---- Reprend le coffre posé.
--- @return true, ou false + raison
+--- Reprend le coffre posé et le range à son emplacement canonique.
 function M.takeChest(where)
-	local free = M.firstFree(true)
+	local free = M.firstFree()
 	if not free then return false, "inventory_full" end
 
 	turtle.select(free)
 	if not turtle[DIGS[where or "down"]]() then
 		return false, "dig_failed"
 	end
-	-- Range le coffre dans son slot réservé s'il est libre.
-	if free ~= config.chestSlot and turtle.getItemCount(config.chestSlot) == 0 then
-		M.moveTo(free, config.chestSlot)
-	end
+
+	local chest = M.findChest()
+	if chest then M.moveToSlot(chest, config.chestSlot) end
 	return true
 end
 
---- Dépose le slot courant dans le conteneur visé.
+--- Dépose le contenu d'un slot dans le conteneur visé.
 -- Échecs bornés : un coffre plein renvoie "container_full" au lieu de boucler.
--- @return true, ou false + raison
 function M.dropTo(where, slot, tries)
 	local fn = DROPS[where or "down"]
 	turtle.select(slot)
@@ -309,8 +297,6 @@ function M.dropTo(where, slot, tries)
 	return true
 end
 
---- Aspire depuis le conteneur visé vers le slot donné.
--- @return true, ou false + raison
 function M.suckFrom(where, slot, count)
 	turtle.select(slot)
 	if not turtle[SUCKS[where or "down"]](count) then
@@ -319,22 +305,80 @@ function M.suckFrom(where, slot, count)
 	return true
 end
 
+-- ---------------------------------------------------------------------------
+-- Rebut et vidage
+-- ---------------------------------------------------------------------------
+
+function M.isTrash(name)
+	if not name then return false end
+	for _, t in ipairs(config.trash) do
+		if t == name then return true end
+	end
+	return false
+end
+
+--- Slots à ne jamais vider : celui du coffre, plus ceux que l'appelant
+--- désigne. Rien n'est protégé pour son seul numéro.
+local function protectedSet(protect)
+	local set = {}
+	for slot in pairs(protect or {}) do set[slot] = true end
+	local chest = M.findChest()
+	if chest then set[chest] = true end
+	return set
+end
+
+--- Nombre de slots contenant du BUTIN : ni le coffre, ni les slots protégés.
+--
+-- Remplace les seuils fondés sur le nombre de slots libres, qui dépendaient du
+-- nombre de slots réservés et devenaient faux dès qu'on y touchait. « Reste-t-il
+-- quelque chose à déposer ? » est la vraie question, et elle ne dépend d'aucun
+-- décompte magique.
+function M.lootCount(protect)
+	local keep = protectedSet(protect)
+	local n = 0
+	for slot = 1, SIZE do
+		if not keep[slot] and turtle.getItemCount(slot) > 0 then n = n + 1 end
+	end
+	return n
+end
+
+--- Jette le rebut par-dessus bord.
+-- @param where  "forward" (défaut), "up" ou "down"
+-- @param opts   { protect = { [slot] = true } }
+-- @return nombre de slots vidés
+function M.dumpTrash(where, opts)
+	local fn = DROPS[where or "forward"]
+	local keep = protectedSet(opts and opts.protect)
+	local emptied = 0
+
+	for slot = 1, SIZE do
+		if not keep[slot] then
+			local d = turtle.getItemDetail(slot)
+			if d and M.isTrash(d.name) then
+				turtle.select(slot)
+				if turtle[fn]() then emptied = emptied + 1 end
+			end
+		end
+	end
+	return emptied
+end
+
 --- Vide l'inventaire dans le conteneur visé.
--- Épargne les slots réservés, le coffre lui-même, et tout nom listé dans
--- `keep`. Le rebut est jeté au sol plutôt que déposé, s'il en reste.
--- @param opts  { keep = { noms }, trashWhere = "forward" }
+-- Le rebut est jeté plutôt que déposé. Sont épargnés : le coffre, les slots
+-- de `protect`, et tout nom listé dans `keep`.
+-- @param opts { protect = { [slot] = true }, keep = { noms }, trashWhere = ... }
 -- @return true, ou false + raison + slot fautif
 function M.unload(where, opts)
 	opts = opts or {}
-	local chest = M.findChest()
+	local protectedSlots = protectedSet(opts.protect)
 
-	local keep = {}
-	for _, name in ipairs(opts.keep or {}) do keep[name] = true end
+	local keepNames = {}
+	for _, name in ipairs(opts.keep or {}) do keepNames[name] = true end
 
 	for slot = 1, SIZE do
-		if not M.isReserved(slot) and slot ~= chest then
+		if not protectedSlots[slot] then
 			local d = turtle.getItemDetail(slot)
-			if d and not keep[d.name] then
+			if d and not keepNames[d.name] then
 				if M.isTrash(d.name) then
 					turtle.select(slot)
 					turtle[DROPS[opts.trashWhere or "forward"]]()

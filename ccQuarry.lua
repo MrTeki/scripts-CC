@@ -23,8 +23,10 @@
 --   3. aucun des deux : la turtle attend qu'on vienne la vider.
 -- Le conteneur fixe sert aussi de source de carburant.
 --
--- Slots réservés : 1 = carburant, 16 = coffre. Le jeu ne les protège pas :
--- il faut donc du carburant en slot 1 AU DÉPART, sinon le butin s'y installe.
+-- Aucun slot n'est interdit au butin. Les slots 1 et 16 sont seulement les
+-- emplacements où la turtle RANGE le carburant et le coffre : ce qui est
+-- épargné lors d'un vidage dépend de ce que le slot contient, pas de son
+-- numéro. Un slot d'emplacement laissé vide sert donc normalement.
 --
 -- Ce script ne contient plus que ce qui lui est propre : la machine à états,
 -- l'interface et les arguments. Le reste vit dans les APIs partagées.
@@ -114,6 +116,7 @@ local DEFAULTS = {
 	fuelTopUp = 2000,         -- visé lors d'un ravitaillement
 	trashWhere = "up",        -- le rebut part dans la couche déjà creusée
 	dropWhenNoChest = false,  -- sans coffre : attendre, plutôt que jeter
+	keepFuel = 64,            -- combustible gardé au vidage ; le reste est du butin
 	trash = {
 		"minecraft:cobblestone",
 		"minecraft:stone",
@@ -165,6 +168,11 @@ return {
     -- Ou part le rebut : "up", "down" ou "forward".
     -- "up" l'envoie dans la couche deja creusee, hors du chemin.
     trashWhere = "up",
+
+    -- Combustible garde lors d'un vidage, en nombre d'objets. Le surplus part
+    -- au coffre : le charbon est aussi du butin, tout garder reviendrait a ne
+    -- jamais le deposer.
+    keepFuel = 64,
 
     -- Carburant garde en reserve en plus du trajet de retour.
     fuelMargin = 64,
@@ -454,7 +462,27 @@ end
 -- États
 -- ---------------------------------------------------------------------------
 
+--- Slots à ne pas vider : de quoi garder du combustible. Le coffre est
+--- protégé par ccInv lui-même, qui sait le reconnaître.
+local function protectedSlots()
+	return (ccFuel.protectSlots(CONFIG.keepFuel))
+end
+
+--- Range l'inventaire : piles partielles regroupées, coffre et carburant
+--- remis à leurs emplacements canoniques.
+local function tidyInventory()
+	ccInv.tidy(ccFuel.bestFuelSlot())
+end
+
 local function needsService()
+	if ccInv.freeCount() <= 2 then
+		-- Le butin miné atterrit dans le slot sélectionné, que chaque
+		-- opération déplace : on se retrouve avec plusieurs piles partielles
+		-- du même bloc. On regroupe AVANT de conclure que c'est plein, sinon
+		-- la turtle rentre pour rien.
+		ccInv.compact()
+	end
+
 	-- Un seul slot libre restant : le prochain bloc miné tomberait par terre.
 	if ccInv.freeCount() <= 1 then return "inventory" end
 	if ccFuel.level() <= ccFuel.reserve(ccNav.position(), nil, CONFIG.fuelMargin) then
@@ -543,7 +571,7 @@ STATES[S.MINING] = function()
 
 	if cell.digUp then ccNav.dig("up") end
 	if cell.digDown then ccNav.dig("down") end
-	ccInv.dumpTrash(CONFIG.trashWhere)
+	ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
 
 	ctx.index = ctx.index + 1
 
@@ -637,8 +665,15 @@ end
 --   3. rien -- l'appelant décide alors d'attendre ou de jeter.
 -- @return "chest", "depot" ou nil
 local function serviceUnload(refuel)
+	-- Rangement AVANT le vidage : le coffre et le carburant retrouvent leurs
+	-- emplacements, et les piles partielles sont regroupées. Sans cela, du
+	-- butin ayant squatté l'emplacement du carburant s'y installait pour de
+	-- bon, puisque l'ancienne version protégeait le slot 1 quel qu'en soit le
+	-- contenu -- au point de jeter le vrai carburant, qui était ailleurs.
+	tidyInventory()
+
 	if placeChest() then
-		local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere })
+		local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
 		if not ok then
 			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
 		end
@@ -650,12 +685,13 @@ local function serviceUnload(refuel)
 
 		local taken, why = ccInv.takeChest("down")
 		if not taken then journal("Reprise du coffre : " .. tostring(why)) end
+		tidyInventory()     -- le ravitaillement a pu disperser le combustible
 		return "chest"
 	end
 
 	local where = findDepot()
 	if where then
-		local ok, reason, slot = ccInv.unload(where, { trashWhere = CONFIG.trashWhere })
+		local ok, reason, slot = ccInv.unload(where, { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
 		if not ok then
 			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
 		end
@@ -666,6 +702,7 @@ local function serviceUnload(refuel)
 			local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
 			if not fine then journal("Carburant : " .. tostring(why)) end
 		end
+		tidyInventory()
 		return "depot"
 	end
 
@@ -677,9 +714,9 @@ STATES[S.SERVICE] = function()
 		-- Aucun moyen de dépôt : on brûle ce qu'on a, on jette le rebut, et le
 		-- reste du service dépend d'un humain.
 		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
-		ccInv.dumpTrash(CONFIG.trashWhere)
+		ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
 		if CONFIG.dropWhenNoChest then
-			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
+			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
 		end
 	end
 
@@ -728,16 +765,16 @@ end
 STATES[S.FINISHING] = function()
 	journalInventory()
 
-	if ccInv.freeCount() < 14 then
+	if ccInv.lootCount(protectedSlots()) > 0 then
 		-- Pas de ravitaillement ici : le chantier est fini.
 		if not serviceUnload(false) then
 			if CONFIG.dropWhenNoChest then
-				ccInv.unload("forward", { trashWhere = CONFIG.trashWhere })
+				ccInv.unload("forward", { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
 			else
 				-- Le chantier est fini mais la turtle tient encore du butin :
 				-- elle attend qu'on la vide plutôt que de l'abandonner au sol.
-				ccInv.dumpTrash(CONFIG.trashWhere)
-				if ccInv.freeCount() < 14 then
+				ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
+				if ccInv.lootCount(protectedSlots()) > 0 then
 					journal("Chantier fini : vider la turtle pour qu'elle s'arrete")
 					ctx.afterWait = S.FINISHING
 					return S.AWAIT_HUMAN

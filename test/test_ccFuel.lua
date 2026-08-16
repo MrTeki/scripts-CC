@@ -190,7 +190,7 @@ H.case("coffre sans combustible : no_fuel_found, contenu intact", function()
 	local inv = mock.getBlock(0, 0, -1).inventory
 	H.eq(inv[1].name, "minecraft:cobblestone", "slot 1 restitué")
 	H.eq(inv[2].count, 10, "slot 2 restitué")
-	H.eq(ccInv.freeCount(), 14, "inventaire rendu")
+	H.eq(ccInv.lootCount(), 0, "la turtle n'a rien gardé")
 end)
 
 H.case("coffre vide : no_fuel_found immédiat", function()
