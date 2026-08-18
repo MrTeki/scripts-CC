@@ -161,6 +161,75 @@ H.case("le journal enregistre l'etat terminal, pas une fausse erreur", function(
 	H.eq(trace:find("Etat inconnu", 1, true), nil, "aucun état inconnu")
 end)
 
+H.case("un menage sterile n'est pas rejoue a chaque cellule", function()
+	-- Signale en jeu : des que la place devenait rare, le menage se relancait
+	-- a chaque cellule, y compris quand il n'avait plus rien a liberer. Ici le
+	-- butin n'est PAS du rebut, donc dumpTrash ne peut rien faire.
+	terrain({ width = 3, depth = 3, height = 6 })
+	mock.putFile("ccquarry.cfg", "return { trash = {} }")
+	-- On remplit l'inventaire pour que la place soit rare des le depart.
+	for slot = 2, 14 do mock.setSlot(slot, "minecraft:diamond", 1) end
+
+	local ccInv = require("ccInv")
+	local menages = 0
+	local vrai = ccInv.compact
+	ccInv.compact = function(...) menages = menages + 1 return vrai(...) end
+
+	mock.setEventBudget(60)
+	pcall(run, "3", "3", "6")
+	ccInv.compact = vrai
+
+	-- Sans le declenchement sur changement, compact partait a chaque cellule.
+	-- Borne : au plus une tentative par slot restant, plus le service.
+	H.ok(menages <= 5, "compact appele " .. menages .. " fois, au plus 5 attendu")
+end)
+
+H.case("la turtle brule son propre charbon au lieu de rentrer", function()
+	-- Remonter a l'origine pour bruler du combustible qu'on a deja en soute
+	-- est un aller-retour pour rien.
+	terrain({ width = 2, depth = 2, height = 6, fuel = 30 })
+	mock.setSlot(5, "minecraft:coal", 20)
+
+	run("2", "2", "6")
+
+	local trace = mock.getFile("ccquarry.log")
+	H.contains(trace, "Ravitaille sur place", "ravitaillement sans deplacement")
+	H.ok(mock.getTurtle().fuel > 30, "du charbon a ete brule")
+end)
+
+H.case("un conteneur non reconnu est nomme dans le journal", function()
+	-- Aucune liste de motifs ne peut couvrir tous les mods : le journal doit
+	-- donner l'identifiant exact a ajouter.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	mock.setBlock(-1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 27 })
+
+	mock.setEventBudget(30)
+	pcall(run, "2", "2", "3")
+
+	local trace = mock.getFile("ccquarry.log")
+	H.contains(trace, "somemod:magic_pouch", "identifiant exact journalise")
+	H.contains(trace, "depotPatterns", "ou l'ajouter")
+end)
+
+H.case("un motif ajoute dans les options fait reconnaitre le conteneur", function()
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	mock.setBlock(-1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 27 })
+	mock.putFile("ccquarry.cfg",
+		'return { depotPatterns = { "chest", "pouch" } }')
+
+	local sorties = run("2", "2", "3")
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier fini")
+	local coffre = mock.getBlock(-1, 0, 0).inventory
+	local trouve = false
+	for _, pile in pairs(coffre) do
+		if pile.name == "minecraft:iron_ore" then trouve = true end
+	end
+	H.eq(trouve, true, "minerai depose dans le conteneur du mod")
+end)
+
 H.case("le rebut n'est pas jete a chaque cellule", function()
 	-- Observe en jeu : la turtle parcourait ses 16 slots apres chaque cellule,
 	-- soit trois blocs mines, ce qui coutait plus cher que le minage. Un select

@@ -117,6 +117,14 @@ local DEFAULTS = {
 	trashWhere = "up",        -- le rebut part dans la couche déjà creusée
 	dropWhenNoChest = false,  -- sans coffre : attendre, plutôt que jeter
 	keepFuel = 64,            -- combustible gardé au vidage ; le reste est du butin
+
+	-- Conteneurs FIXES acceptés, par motif dans l'identifiant du bloc.
+	depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
+
+	-- Conteneurs TRANSPORTABLES acceptés. Plus restrictif : la turtle les
+	-- casse pour les reprendre, donc ils doivent garder leur contenu.
+	chestPatterns = { "ender_chest", "enderchest", "ender_storage", "enderstorage", "shulker_box" },
+
 	trash = {
 		"minecraft:cobblestone",
 		"minecraft:stone",
@@ -168,6 +176,17 @@ return {
     -- Ou part le rebut : "up", "down" ou "forward".
     -- "up" l'envoie dans la couche deja creusee, hors du chemin.
     trashWhere = "up",
+
+    -- Conteneurs FIXES acceptes, par motif cherche dans l'identifiant du bloc
+    -- (en minuscules). Aucune liste ne peut couvrir tous les mods : si votre
+    -- conteneur n'est pas reconnu, le journal indique son identifiant exact,
+    -- il suffit d'ajouter un motif ici.
+    depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
+
+    -- Conteneurs TRANSPORTABLES acceptes, que la turtle pose puis reprend.
+    -- Plus restrictif : elle les CASSE, donc ils doivent garder leur contenu.
+    -- Un coffre ordinaire eparpillerait tout.
+    chestPatterns = { "ender_chest", "enderchest", "ender_storage", "enderstorage", "shulker_box" },
 
     -- Combustible garde lors d'un vidage, en nombre d'objets. Le surplus part
     -- au coffre : le charbon est aussi du butin, tout garder reviendrait a ne
@@ -474,6 +493,24 @@ local function tidyInventory()
 	ccInv.tidy(ccFuel.bestFuelSlot())
 end
 
+--- Tente de couvrir la réserve avec le combustible déjà en soute, sans bouger.
+--
+-- Remonter à l'origine pour brûler du charbon qu'on transporte est un
+-- aller-retour pour rien -- et la carrière en produit justement.
+-- @return true si la réserve est de nouveau couverte
+local function refuelOnSite()
+	local function covered()
+		return ccFuel.level() > ccFuel.reserve(ccNav.position(), nil, CONFIG.fuelMargin)
+	end
+	if covered() then return true end
+
+	ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
+	if not covered() then return false end
+
+	journal("Ravitaille sur place")
+	return true
+end
+
 local function needsService()
 	-- Le ménage n'a lieu QUE lorsque la place vient à manquer.
 	--
@@ -487,18 +524,29 @@ local function needsService()
 	-- éviter le trajet de retour. Il suffit donc de la vider juste avant que
 	-- l'inventaire ne force ce trajet. getItemCount étant immédiat, le test
 	-- ci-dessous, lui, ne coûte rien.
-	if ccInv.freeCount() <= 2 then
+	--
+	-- Et il est déclenché sur un CHANGEMENT, pas sur un niveau. Sur le niveau,
+	-- il se relançait à chaque cellule dès que la place devenait rare, y
+	-- compris quand il n'y avait plus rien à libérer -- butin absent de la
+	-- liste de rebut, ou piles déjà compactées. Tant que la place ne diminue
+	-- pas, refaire le ménage ne peut rien libérer de plus : on ne le relance
+	-- donc que si un slot de plus a été occupé depuis la dernière fois, ce qui
+	-- borne les tentatives stériles à une par slot.
+	local free = ccInv.freeCount()
+
+	if free <= 2 and free < (ctx.lastTidy or math.huge) then
 		ccInv.compact()
 		if #CONFIG.trash > 0 then
 			ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
 		end
+		free = ccInv.freeCount()
+		ctx.lastTidy = free
 	end
 
 	-- Un seul slot libre restant : le prochain bloc miné tomberait par terre.
-	if ccInv.freeCount() <= 1 then return "inventory" end
-	if ccFuel.level() <= ccFuel.reserve(ccNav.position(), nil, CONFIG.fuelMargin) then
-		return "fuel"
-	end
+	if free <= 1 then return "inventory" end
+
+	if not refuelOnSite() then return "fuel" end
 	return nil
 end
 
@@ -559,6 +607,10 @@ STATES[S.GO_TO_WORK] = function()
 	end
 
 	if reason == "no_fuel" or reason == "denied" then
+		-- La garde refuse le mouvement AVANT que MINAGE ne puisse tester quoi
+		-- que ce soit : c'est donc ici, et pas seulement dans needsService,
+		-- qu'il faut envisager de brûler ce qu'on transporte.
+		if refuelOnSite() then return S.GO_TO_WORK end
 		ctx.reason = "fuel"
 		return S.RETURN_HOME
 	end
@@ -652,12 +704,19 @@ end
 -- La turtle finit face au conteneur quand il est horizontal.
 -- @return "forward", "up" ou nil
 local function findDepot()
+	-- Les blocs examinés et rejetés sont journalisés : aucune liste de motifs
+	-- ne peut couvrir tous les mods, et sans cette trace un conteneur non
+	-- reconnu ne laisse aucune indication de ce qu'il aurait fallu ajouter à
+	-- depotPatterns.
+	local seen = {}
+
 	for _ = 1, 4 do
 		local found, name = ccInv.depotAt("forward")
 		if found then
 			journal("Depot fixe : " .. name)
 			return "forward"
 		end
+		if name then seen[#seen + 1] = name end
 		ccNav.turnRight()
 	end
 
@@ -665,6 +724,12 @@ local function findDepot()
 	if above then
 		journal("Depot fixe au-dessus : " .. name)
 		return "up"
+	end
+	if name then seen[#seen + 1] = name end
+
+	if #seen > 0 then
+		journal("Aucun depot reconnu parmi : " .. table.concat(seen, ", "))
+		journal("Ajouter un motif a depotPatterns dans " .. CONFIG_PATH)
 	end
 	return nil
 end
@@ -710,6 +775,8 @@ local function serviceUnload(refuel)
 		end
 
 		if refuel and ccFuel.level() < CONFIG.fuelTopUp then
+			-- Le moins cher d abord : ce qu on transporte deja.
+			ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
 			local fine, why = ccFuel.refuelFromChest("down", CONFIG.fuelTopUp)
 			if not fine then journal("Carburant : " .. tostring(why)) end
 		end
@@ -730,6 +797,8 @@ local function serviceUnload(refuel)
 		-- Le conteneur fixe sert aussi de source de carburant : c'est là qu'on
 		-- vient déposer du charbon pour la turtle.
 		if refuel and ccFuel.level() < CONFIG.fuelTopUp then
+			-- Le moins cher d abord : ce qu on transporte deja.
+			ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
 			local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
 			if not fine then journal("Carburant : " .. tostring(why)) end
 		end
@@ -743,13 +812,18 @@ end
 STATES[S.SERVICE] = function()
 	if not serviceUnload(true) then
 		-- Aucun moyen de dépôt : on brûle ce qu'on a, on jette le rebut, et le
-		-- reste du service dépend d'un humain.
+		-- reste du service dépend d'un humain. Le butin, lui, reste à bord.
+		journal("Aucun conteneur a l'origine : le butin reste a bord")
 		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
 		ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
 		if CONFIG.dropWhenNoChest then
 			ccInv.unload("forward", { trashWhere = trashAwayFrom("forward"), protect = protectedSlots() })
 		end
 	end
+
+	-- L'inventaire vient d'être remanié : le prochain ménage doit pouvoir
+	-- se déclencher, quel que soit l'état d'avant le retour.
+	ctx.lastTidy = nil
 
 	if ctx.reason == "abort" then return S.FINISHING end
 
@@ -987,7 +1061,11 @@ local configWarnings, configCreated
 CONFIG, configWarnings, configCreated = ccConfig.load(CONFIG_PATH, DEFAULTS, CONFIG_TEMPLATE)
 
 ccNav.reset()
-ccInv.reset({ trash = CONFIG.trash })
+ccInv.reset({
+	trash = CONFIG.trash,
+	depotPatterns = CONFIG.depotPatterns,
+	chestPatterns = CONFIG.chestPatterns,
+})
 if not setup(args) then return end
 
 -- Sauvegarde à CHAQUE mouvement, et pas seulement aux transitions d'état.
