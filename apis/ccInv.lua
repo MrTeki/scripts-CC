@@ -137,6 +137,20 @@ end
 -- Rangement
 -- ---------------------------------------------------------------------------
 
+--- Restitue la sélection d'entrée.
+--
+-- PROPRIÉTÉ des opérations d'inventaire de ce module : elles rendent la
+-- sélection telle qu'elles l'ont trouvée. CC range le butin dans le slot
+-- SÉLECTIONNÉ en priorité ; une opération qui laisse la sélection sur le
+-- dernier slot qu'elle a vidé casse donc l'empilement dense du minage suivant,
+-- y compris celui du trajet vers la cellule d'après.
+--
+-- getSelectedSlot est immédiat, select coûte un tick : on ne paie que si la
+-- sélection a réellement bougé.
+local function restoreSelection(entry)
+	if turtle.getSelectedSlot() ~= entry then turtle.select(entry) end
+end
+
 --- Regroupe les piles partielles d'un même objet.
 --
 -- Le butin miné atterrit dans le slot SÉLECTIONNÉ, et chaque opération
@@ -145,6 +159,7 @@ end
 -- qui occupent des slots pour rien et déclenchent un vidage prématuré.
 -- @return nombre de transferts effectués
 function M.compact()
+	local entry = turtle.getSelectedSlot()
 	local moves = 0
 	for target = 1, SIZE - 1 do
 		local d = turtle.getItemDetail(target)
@@ -161,6 +176,7 @@ function M.compact()
 			end
 		end
 	end
+	restoreSelection(entry)
 	return moves
 end
 
@@ -184,6 +200,7 @@ end
 function M.moveToSlot(from, to)
 	if from == to then return true end
 	if turtle.getItemCount(from) == 0 then return true end
+	local entry = turtle.getSelectedSlot()
 
 	local dest = turtle.getItemDetail(to)
 	if dest then
@@ -194,13 +211,18 @@ function M.moveToSlot(from, to)
 			if not spare then return false, "inventory_full" end
 			turtle.select(to)
 			turtle.transferTo(spare)
-			if turtle.getItemCount(to) > 0 then return false, "transfer_failed" end
+			if turtle.getItemCount(to) > 0 then
+				restoreSelection(entry)
+				return false, "transfer_failed"
+			end
 		end
 	end
 
 	turtle.select(from)
 	turtle.transferTo(to)
-	return turtle.getItemCount(from) == 0
+	local moved = turtle.getItemCount(from) == 0
+	restoreSelection(entry)
+	return moved
 end
 
 --- Range le coffre et le carburant à leurs emplacements canoniques.
@@ -364,6 +386,7 @@ end
 function M.dumpTrash(where, opts)
 	local fn = DROPS[where or "forward"]
 	local keep = protectedSet(opts and opts.protect)
+	local entry = turtle.getSelectedSlot()
 	local emptied = 0
 
 	for slot = 1, SIZE do
@@ -375,6 +398,8 @@ function M.dumpTrash(where, opts)
 			end
 		end
 	end
+
+	restoreSelection(entry)
 	return emptied
 end
 
@@ -386,6 +411,7 @@ end
 function M.unload(where, opts)
 	opts = opts or {}
 	local protectedSlots = protectedSet(opts.protect)
+	local entry = turtle.getSelectedSlot()
 
 	local keepNames = {}
 	for _, name in ipairs(opts.keep or {}) do keepNames[name] = true end
@@ -399,11 +425,16 @@ function M.unload(where, opts)
 					turtle[DROPS[opts.trashWhere or "forward"]]()
 				else
 					local ok, reason = M.dropTo(where, slot)
-					if not ok then return false, reason, slot end
+					if not ok then
+						restoreSelection(entry)
+						return false, reason, slot
+					end
 				end
 			end
 		end
 	end
+
+	restoreSelection(entry)
 	return true
 end
 

@@ -203,6 +203,33 @@ H.case("la selection repart du premier slot avant chaque cellule", function()
 	end
 end)
 
+H.case("le butin ramasse EN TRAJET va aussi dans les premiers slots", function()
+	-- goTo creuse devant lui : la majorite du butin est ramassee pendant le
+	-- deplacement, pas au moment de creuser la cellule. Une operation qui
+	-- laisse la selection ailleurs -- dumpTrash sur le dernier slot vide, ou
+	-- ccFuel sur un slot de travail -- envoyait tout ce butin s'eparpiller.
+	terrain({ width = 3, depth = 3, height = 6 })
+
+	local vus = {}
+	local vraiDig = turtle.dig
+	turtle.dig = function()
+		local avant = turtle.getSelectedSlot()
+		local ok = vraiDig()
+		if ok then vus[#vus + 1] = avant end
+		return ok
+	end
+
+	run("3", "3", "6")
+	turtle.dig = vraiDig
+
+	H.ok(#vus > 5, "plusieurs blocs mines en trajet")
+	local hors = 0
+	for _, slot in ipairs(vus) do
+		if slot ~= 1 then hors = hors + 1 end
+	end
+	H.eq(hors, 0, hors .. " blocs mines hors du premier slot")
+end)
+
 H.case("le rebut part au sol et n'engorge pas l'inventaire", function()
 	terrain({ width = 3, depth = 3, height = 6 })
 	run("3", "3", "6")

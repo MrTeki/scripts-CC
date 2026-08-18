@@ -528,6 +528,13 @@ end
 STATES[S.GO_TO_WORK] = function()
 	ccNav.setGuard(ccFuel.guard(ccNav.position, nil, CONFIG.fuelMargin))
 
+	-- goTo creuse devant lui : la MAJORITÉ du butin est ramassée pendant le
+	-- trajet, pas au moment de creuser la cellule. La sélection doit donc être
+	-- remise ici aussi. Les opérations de ccInv sont transparentes, mais celles
+	-- de ccFuel laissent volontairement la sélection sur un slot de travail,
+	-- puisque isFuel() lit le slot sélectionné.
+	ccInv.selectForMining()
+
 	if ctx.index > ccPlan.total(ctx.job) then
 		ctx.reason = "done"
 		return S.RETURN_HOME

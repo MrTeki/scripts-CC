@@ -200,6 +200,45 @@ H.case("compact ne mélange jamais deux objets différents", function()
 	H.eq(ccInv.count(3), 10, "charbon de bois intact")
 end)
 
+H.case("les opérations rendent la sélection telle qu'elles l'ont trouvée", function()
+	-- Sans cela, dumpTrash laisse la sélection sur le dernier slot vidé, et
+	-- tout ce qui est miné ensuite -- y compris pendant le trajet vers la
+	-- cellule suivante, qui creuse devant lui -- y atterrit.
+	fresh({ trash = { "minecraft:cobblestone" } })
+	mock.setSlot(1, "minecraft:coal", 64)
+	mock.setSlot(5, "minecraft:cobblestone", 64)
+	mock.setSlot(9, "minecraft:cobblestone", 64)
+	mock.setSlot(11, "minecraft:iron_ore", 3)
+	mock.setSlot(12, "minecraft:iron_ore", 3)
+	mock.setChest(0, 0, -1, {}, 27)
+
+	turtle.select(1)
+	ccInv.dumpTrash("up")
+	H.eq(turtle.getSelectedSlot(), 1, "après dumpTrash")
+
+	ccInv.compact()
+	H.eq(turtle.getSelectedSlot(), 1, "après compact")
+
+	ccInv.moveToSlot(11, 7)
+	H.eq(turtle.getSelectedSlot(), 1, "après moveToSlot")
+
+	ccInv.unload("down", { protect = { [1] = true } })
+	H.eq(turtle.getSelectedSlot(), 1, "après unload")
+end)
+
+H.case("la sélection est rendue même quand l'opération échoue", function()
+	fresh()
+	local plein = {}
+	for i = 1, 27 do plein[i] = { name = "minecraft:stone", count = 64 } end
+	mock.setChest(0, 0, -1, plein, 27)
+	mock.setSlot(4, "minecraft:diamond", 5)
+
+	turtle.select(1)
+	local ok = ccInv.unload("down")
+	H.eq(ok, false, "vidage impossible, coffre plein")
+	H.eq(turtle.getSelectedSlot(), 1, "sélection rendue malgré l'échec")
+end)
+
 H.case("selectForMining ramène la sélection au premier slot", function()
 	fresh()
 	turtle.select(9)
