@@ -161,6 +161,56 @@ H.case("le journal enregistre l'etat terminal, pas une fausse erreur", function(
 	H.eq(trace:find("Etat inconnu", 1, true), nil, "aucun état inconnu")
 end)
 
+--- Chantier ou chaque colonne donne un bloc DIFFERENT : l'inventaire se
+--- remplit vraiment, au lieu que tout s'empile en trois slots.
+local function terrainVarie(w, d, h)
+	terrain({ width = w, depth = d, height = h })
+	for x = 0, w - 1 do
+		for y = 0, d - 1 do
+			for z = -1, -(h + 2), -1 do
+				mock.setBlock(x, y, z, "minecraft:rock_" .. (x * d + y))
+			end
+		end
+	end
+end
+
+--- Releve le nombre de slots libres au moment de chaque vidage.
+local function auVidage(cfg, w, d, h)
+	local ccInv = require("ccInv")
+	terrainVarie(w, d, h)
+	mock.putFile("ccquarry.cfg", cfg)
+
+	local libres = {}
+	local vrai = ccInv.unload
+	ccInv.unload = function(...)
+		libres[#libres + 1] = ccInv.freeCount()
+		return vrai(...)
+	end
+
+	pcall(run, tostring(w), tostring(d), tostring(h))
+	ccInv.unload = vrai
+	return libres
+end
+
+H.case("la turtle rentre en gardant la marge configuree", function()
+	-- On ne cherche pas a prevoir si le prochain bloc tiendra : inspect() donne
+	-- le nom du BLOC, pas celui du BUTIN, et un meme bloc peut lacher plusieurs
+	-- objets. On garde donc une marge, et on rentre des qu'elle est atteinte
+	-- une fois l'inventaire range.
+	local serre = auVidage("return { trash = {}, spareSlots = 1 }", 4, 4, 12)
+	local large = auVidage("return { trash = {}, spareSlots = 5 }", 4, 4, 12)
+
+	H.ok(#serre > 0 and #large > 0, "vidages observes dans les deux cas")
+
+	-- Mesure prise DANS serviceUnload, donc apres le compactage qui libere
+	-- parfois un slot de plus : d'ou la tolerance.
+	H.ok(serre[1] <= 3, "marge serree : " .. serre[1] .. " slots libres au vidage")
+	H.ok(large[1] > serre[1],
+		"marge large respectee : " .. large[1] .. " contre " .. serre[1])
+
+	H.eq(mock.groundCount("minecraft:rock_0"), 0, "aucun bloc perdu au sol")
+end)
+
 H.case("un menage sterile n'est pas rejoue a chaque cellule", function()
 	-- Signale en jeu : des que la place devenait rare, le menage se relancait
 	-- a chaque cellule, y compris quand il n'avait plus rien a liberer. Ici le

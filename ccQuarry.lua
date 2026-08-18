@@ -117,6 +117,7 @@ local DEFAULTS = {
 	trashWhere = "up",        -- le rebut part dans la couche déjà creusée
 	dropWhenNoChest = false,  -- sans coffre : attendre, plutôt que jeter
 	keepFuel = 64,            -- combustible gardé au vidage ; le reste est du butin
+	spareSlots = 2,           -- marge de slots libres avant de rentrer vider
 
 	-- Taille minimale d'un inventaire pour servir de dépôt, quand l'API
 	-- peripheral peut la donner. 27 = capacité d'un coffre vanilla.
@@ -202,6 +203,14 @@ return {
     -- au coffre : le charbon est aussi du butin, tout garder reviendrait a ne
     -- jamais le deposer.
     keepFuel = 64,
+
+    -- Slots laisses libres avant de rentrer vider. C'est une MARGE, pas du
+    -- gaspillage : entre deux verifications la turtle ramasse au moins trois
+    -- blocs, et davantage dans du gravier. Ce que l'inventaire ne peut plus
+    -- accueillir est perdu en silence, turtle.dig() ne signalant rien.
+    -- Monter a 3 si vous constatez des pertes ; descendre a 1 pour remplir au
+    -- maximum, au risque d'en perdre.
+    spareSlots = 2,
 
     -- Carburant garde en reserve en plus du trajet de retour.
     fuelMargin = 64,
@@ -544,7 +553,7 @@ local function needsService()
 	-- borne les tentatives stériles à une par slot.
 	local free = ccInv.freeCount()
 
-	if free <= 2 and free < (ctx.lastTidy or math.huge) then
+	if free <= CONFIG.spareSlots and free < (ctx.lastTidy or math.huge) then
 		ccInv.compact()
 		if #CONFIG.trash > 0 then
 			ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
@@ -553,8 +562,19 @@ local function needsService()
 		ctx.lastTidy = free
 	end
 
-	-- Un seul slot libre restant : le prochain bloc miné tomberait par terre.
-	if free <= 1 then return "inventory" end
+	-- Tout est rangé et il ne reste que la marge : on rentre.
+	--
+	-- On ne cherche PAS à prévoir si le prochain bloc tiendra. turtle.inspect()
+	-- donne le nom du BLOC, pas celui du BUTIN : la pierre lâche du cobble, le
+	-- gravier lâche du gravier ou du silex, et un même bloc peut lâcher
+	-- plusieurs objets différents. Aucune prévision fiable n'est possible.
+	--
+	-- On garde donc une marge. Entre deux passages ici, la turtle ramasse au
+	-- moins trois blocs -- creusement en haut, en bas, et devant elle en
+	-- avançant -- et davantage si elle traverse du gravier. Sans marge, ce que
+	-- l'inventaire ne peut plus accueillir est perdu EN SILENCE : turtle.dig()
+	-- renvoie true même quand l'objet tombe au sol faute de place.
+	if free <= CONFIG.spareSlots then return "inventory" end
 
 	if not refuelOnSite() then return "fuel" end
 	return nil
