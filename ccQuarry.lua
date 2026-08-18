@@ -118,7 +118,11 @@ local DEFAULTS = {
 	dropWhenNoChest = false,  -- sans coffre : attendre, plutôt que jeter
 	keepFuel = 64,            -- combustible gardé au vidage ; le reste est du butin
 
-	-- Conteneurs FIXES acceptés, par motif dans l'identifiant du bloc.
+	-- Taille minimale d'un inventaire pour servir de dépôt, quand l'API
+	-- peripheral peut la donner. 27 = capacité d'un coffre vanilla.
+	depotMinSlots = 27,
+
+	-- Conteneurs FIXES : repli par motif, quand peripheral ne voit pas le bloc.
 	depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
 
 	-- Conteneurs TRANSPORTABLES acceptés. Plus restrictif : la turtle les
@@ -177,10 +181,16 @@ return {
     -- "up" l'envoie dans la couche deja creusee, hors du chemin.
     trashWhere = "up",
 
-    -- Conteneurs FIXES acceptes, par motif cherche dans l'identifiant du bloc
-    -- (en minuscules). Aucune liste ne peut couvrir tous les mods : si votre
-    -- conteneur n'est pas reconnu, le journal indique son identifiant exact,
-    -- il suffit d'ajouter un motif ici.
+    -- Taille minimale d'un inventaire pour servir de depot. L'API peripheral
+    -- dit si un bloc voisin est un inventaire et combien de slots il a, ce
+    -- qu'aucune liste de noms ne peut suivre d'un mod a l'autre. Le seuil
+    -- ecarte les machines, qui n'ont qu'un petit tampon -- un four en a 3, un
+    -- hopper 5 -- la ou un coffre vanilla en a 27.
+    depotMinSlots = 27,
+
+    -- REPLI par motif, utilise seulement quand l'API peripheral ne voit pas le
+    -- bloc voisin. Si votre conteneur n'est reconnu par aucune des deux voies,
+    -- le journal indique son identifiant exact : ajoutez un motif ici.
     depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
 
     -- Conteneurs TRANSPORTABLES acceptes, que la turtle pose puis reprend.
@@ -704,32 +714,35 @@ end
 -- La turtle finit face au conteneur quand il est horizontal.
 -- @return "forward", "up" ou nil
 local function findDepot()
-	-- Les blocs examinés et rejetés sont journalisés : aucune liste de motifs
-	-- ne peut couvrir tous les mods, et sans cette trace un conteneur non
-	-- reconnu ne laisse aucune indication de ce qu'il aurait fallu ajouter à
-	-- depotPatterns.
+	-- Les blocs examinés et rejetés sont journalisés, avec leur taille quand
+	-- l'API peripheral la donne : sans cette trace, un conteneur non reconnu
+	-- ne laisse aucune indication de ce qu'il faut déclarer.
 	local seen = {}
 
+	local function describe(name, slots)
+		return name .. (slots and (" (" .. slots .. " slots)") or " (nom seul)")
+	end
+
 	for _ = 1, 4 do
-		local found, name = ccInv.depotAt("forward")
+		local found, name, slots = ccInv.depotAt("forward")
 		if found then
-			journal("Depot fixe : " .. name)
+			journal("Depot fixe : " .. describe(name, slots))
 			return "forward"
 		end
-		if name then seen[#seen + 1] = name end
+		if name then seen[#seen + 1] = describe(name, slots) end
 		ccNav.turnRight()
 	end
 
-	local above, name = ccInv.depotAt("up")
+	local above, name, slots = ccInv.depotAt("up")
 	if above then
-		journal("Depot fixe au-dessus : " .. name)
+		journal("Depot fixe au-dessus : " .. describe(name, slots))
 		return "up"
 	end
-	if name then seen[#seen + 1] = name end
+	if name then seen[#seen + 1] = describe(name, slots) end
 
 	if #seen > 0 then
 		journal("Aucun depot reconnu parmi : " .. table.concat(seen, ", "))
-		journal("Ajouter un motif a depotPatterns dans " .. CONFIG_PATH)
+		journal("Voir depotMinSlots et depotPatterns dans " .. CONFIG_PATH)
 	end
 	return nil
 end
@@ -1063,6 +1076,7 @@ CONFIG, configWarnings, configCreated = ccConfig.load(CONFIG_PATH, DEFAULTS, CON
 ccNav.reset()
 ccInv.reset({
 	trash = CONFIG.trash,
+	depotMinSlots = CONFIG.depotMinSlots,
 	depotPatterns = CONFIG.depotPatterns,
 	chestPatterns = CONFIG.chestPatterns,
 })

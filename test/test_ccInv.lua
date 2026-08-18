@@ -143,6 +143,62 @@ H.case("isDepot accepte tout inventaire fixe, isChest reste restrictif", functio
 	H.eq(ccInv.isDepot("minecraft:dirt"), false, "terre")
 end)
 
+H.case("depotAt interroge peripheral en priorité, et compte les slots", function()
+	-- Plus fiable qu'une liste de noms : l'API dit si le bloc est un inventaire
+	-- et de quelle taille, quel que soit le mod.
+	fresh()
+	mock.setChest(1, 0, 0, {}, 27)
+
+	local found, name, slots = ccInv.depotAt("forward")
+	H.eq(found, true, "coffre accepté")
+	H.eq(name, "minecraft:chest", "nom remonté")
+	H.eq(slots, 27, "taille remontée par peripheral")
+end)
+
+H.case("un petit tampon de machine est écarté par le seuil", function()
+	-- Un four a 3 slots, un hopper 5 : ce sont des machines, pas du stockage.
+	fresh()
+	mock.setChest(1, 0, 0, {}, 5)
+	mock.setBlock(1, 0, 0, { name = "minecraft:hopper", inventory = {}, size = 5 })
+
+	local found, name, slots = ccInv.depotAt("forward")
+	H.eq(found, false, "refusé malgré le nom présent dans depotPatterns")
+	H.eq(slots, 5, "taille connue")
+	H.eq(name, "minecraft:hopper", "nom remonté")
+end)
+
+H.case("le seuil est configurable", function()
+	fresh({ depotMinSlots = 5 })
+	mock.setBlock(1, 0, 0, { name = "minecraft:hopper", inventory = {}, size = 5 })
+	H.eq(ccInv.depotAt("forward"), true, "accepté avec un seuil abaissé")
+end)
+
+H.case("un conteneur d'un mod inconnu est reconnu par sa taille", function()
+	-- C'est tout l'intérêt : aucun motif de nom ne correspond, mais l'API
+	-- peripheral tranche.
+	fresh()
+	mock.setBlock(1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 54 })
+
+	H.eq(ccInv.isDepot("somemod:magic_pouch"), false, "aucun motif ne correspond")
+	H.eq(ccInv.depotAt("forward"), true, "accepté par sa taille")
+end)
+
+H.case("sans peripheral sur les blocs voisins, repli sur les motifs", function()
+	-- Sur un turtle, left et right sont réservés aux upgrades : il n'est pas
+	-- acquis qu'il voie ses voisins. Le repli doit rester fonctionnel.
+	fresh()
+	mock.setAdjacentPeripherals(false)
+
+	mock.setBlock(1, 0, 0, { name = "minecraft:chest", inventory = {}, size = 27 })
+	local found, name, slots = ccInv.depotAt("forward")
+	H.eq(found, true, "reconnu par son nom")
+	H.eq(name, "minecraft:chest", "nom remonté")
+	H.isNil(slots, "taille inconnue par cette voie")
+
+	mock.setBlock(1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 54 })
+	H.eq(ccInv.depotAt("forward"), false, "nom inconnu, et pas de peripheral")
+end)
+
 H.case("depotAt inspecte au lieu de tenter un dépôt", function()
 	-- turtle.drop() réussit AUSSI quand il n'y a rien en face : sans
 	-- inspection, « déposer dans le coffre » et « perdre son butin au sol »

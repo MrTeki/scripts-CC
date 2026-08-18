@@ -19,7 +19,7 @@ local M = {}
 -- ---------------------------------------------------------------------------
 
 local files, dirs, writeFaults, truncateFaults
-local world, entities, peripherals, gpsOrigin, ground, rednetState
+local world, entities, peripherals, gpsOrigin, ground, rednetState, adjacentPeripherals
 local httpRoutes, httpLog, httpEnabled
 local t                    -- état du turtle
 local clock, events, timers, nextTimer, eventBudget
@@ -45,6 +45,10 @@ function M.reset(opts)
 	opts = opts or {}
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
 	world, entities, peripherals, gpsOrigin, ground = {}, {}, {}, nil, {}
+	-- Les blocs adjacents sont-ils visibles par l'API peripheral ? Sur un vrai
+	-- turtle, left et right sont reserves aux upgrades, et il n'est pas acquis
+	-- qu'il voie ses voisins. Les deux cas doivent donc etre testables.
+	adjacentPeripherals = true
 	rednetState = { open = nil, sent = {}, inbox = {} }
 	httpRoutes, httpLog, httpEnabled = {}, {}, true
 	clock, events, timers, nextTimer = 0, {}, {}, 1
@@ -105,6 +109,11 @@ end
 function M.setGps(wx, wy, wz)
 	gpsOrigin = { wx = wx, wy = wy, wz = wz }
 end
+
+--- Les blocs adjacents sont-ils exposés par l'API peripheral ?
+-- Sur un turtle, ce n'est pas acquis : left et right servent aux upgrades.
+-- Le mettre à false vérifie le repli sur la reconnaissance par nom.
+function M.setAdjacentPeripherals(enabled) adjacentPeripherals = enabled end
 
 --- Branche un périphérique sur un côté. `api` est la table renvoyée par wrap().
 -- L'ordre d'ajout est conservé : peripheral.getNames() le respecte, comme en jeu.
@@ -764,6 +773,17 @@ function M.install()
 	_G.term = term
 	_G.colors = colors
 	_G.colours = colors
+	-- Bloc voisin correspondant à un côté, quand l'API peripheral voit les
+	-- blocs adjacents. Les côtés d'un turtle : front, top, bottom.
+	local function adjacentBlock(side)
+		if not adjacentPeripherals then return nil end
+		local d = DELTA[t.dir]
+		if side == "front" then return world[key(t.x + d.x, t.y + d.y, t.z)] end
+		if side == "top" then return world[key(t.x, t.y, t.z + 1)] end
+		if side == "bottom" then return world[key(t.x, t.y, t.z - 1)] end
+		return nil
+	end
+
 	_G.peripheral = {
 		getNames = function()
 			local out = {}
@@ -774,13 +794,31 @@ function M.install()
 			for _, p in ipairs(peripherals) do
 				if p.side == side then return p.ptype end
 			end
+			local b = adjacentBlock(side)
+			if b and b.inventory then return "inventory" end
+			return nil
+		end,
+		hasType = function(side, wanted)
+			for _, p in ipairs(peripherals) do
+				if p.side == side then return p.ptype == wanted end
+			end
+			local b = adjacentBlock(side)
+			if b and b.inventory then return wanted == "inventory" end
 			return nil
 		end,
 		isPresent = function(side)
 			for _, p in ipairs(peripherals) do
 				if p.side == side then return true end
 			end
-			return false
+			return adjacentBlock(side) ~= nil
+		end,
+		call = function(side, method, ...)
+			for _, p in ipairs(peripherals) do
+				if p.side == side then return p.api[method](...) end
+			end
+			local b = adjacentBlock(side)
+			if b and b.inventory and method == "size" then return b.size end
+			error("No such peripheral: " .. tostring(side), 0)
 		end,
 		wrap = function(side)
 			for _, p in ipairs(peripherals) do

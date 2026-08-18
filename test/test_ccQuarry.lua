@@ -197,37 +197,56 @@ H.case("la turtle brule son propre charbon au lieu de rentrer", function()
 	H.ok(mock.getTurtle().fuel > 30, "du charbon a ete brule")
 end)
 
-H.case("un conteneur non reconnu est nomme dans le journal", function()
-	-- Aucune liste de motifs ne peut couvrir tous les mods : le journal doit
-	-- donner l'identifiant exact a ajouter.
+H.case("un conteneur d'un mod inconnu est accepte sur sa TAILLE", function()
+	-- Aucun motif de nom ne correspond, mais l'API peripheral tranche : c'est
+	-- un inventaire de 54 slots, donc du stockage.
 	terrain({ width = 2, depth = 2, height = 3, noChest = true,
 		ore = { { 1, 1, -1 } } })
-	mock.setBlock(-1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 27 })
+	mock.setBlock(-1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 54 })
+
+	local sorties = run("2", "2", "3")
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier fini")
+	local trouve = false
+	for _, pile in pairs(mock.getBlock(-1, 0, 0).inventory) do
+		if pile.name == "minecraft:iron_ore" then trouve = true end
+	end
+	H.eq(trouve, true, "minerai depose sans qu'aucun motif ne corresponde")
+
+	H.contains(mock.getFile("ccquarry.log"), "54 slots", "taille journalisee")
+end)
+
+H.case("un tampon de machine est ecarte, et nomme dans le journal", function()
+	-- 5 slots : c'est un hopper, pas du stockage. Le journal doit donner
+	-- l'identifiant ET la taille, pour pouvoir trancher.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true,
+		ore = { { 1, 1, -1 } } })
+	mock.setBlock(-1, 0, 0, { name = "somemod:tiny_buffer", inventory = {}, size = 5 })
 
 	mock.setEventBudget(30)
 	pcall(run, "2", "2", "3")
 
 	local trace = mock.getFile("ccquarry.log")
-	H.contains(trace, "somemod:magic_pouch", "identifiant exact journalise")
-	H.contains(trace, "depotPatterns", "ou l'ajouter")
+	H.contains(trace, "somemod:tiny_buffer", "identifiant exact journalise")
+	H.contains(trace, "5 slots", "taille journalisee")
+	H.contains(trace, "depotMinSlots", "ou regler le seuil")
+	H.eq(mock.groundCount("minecraft:iron_ore"), 0, "le butin n'est pas perdu")
 end)
 
-H.case("un motif ajoute dans les options fait reconnaitre le conteneur", function()
+H.case("abaisser depotMinSlots fait accepter un petit conteneur", function()
 	terrain({ width = 2, depth = 2, height = 3, noChest = true,
 		ore = { { 1, 1, -1 } } })
-	mock.setBlock(-1, 0, 0, { name = "somemod:magic_pouch", inventory = {}, size = 27 })
-	mock.putFile("ccquarry.cfg",
-		'return { depotPatterns = { "chest", "pouch" } }')
+	mock.setBlock(-1, 0, 0, { name = "somemod:tiny_buffer", inventory = {}, size = 5 })
+	mock.putFile("ccquarry.cfg", "return { depotMinSlots = 5 }")
 
 	local sorties = run("2", "2", "3")
 
 	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier fini")
-	local coffre = mock.getBlock(-1, 0, 0).inventory
 	local trouve = false
-	for _, pile in pairs(coffre) do
+	for _, pile in pairs(mock.getBlock(-1, 0, 0).inventory) do
 		if pile.name == "minecraft:iron_ore" then trouve = true end
 	end
-	H.eq(trouve, true, "minerai depose dans le conteneur du mod")
+	H.eq(trouve, true, "minerai depose")
 end)
 
 H.case("le rebut n'est pas jete a chaque cellule", function()

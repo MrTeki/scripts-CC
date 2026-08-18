@@ -56,9 +56,16 @@ local DEFAULTS = {
 		"ender_chest", "enderchest", "ender_storage", "enderstorage", "shulker_box",
 	},
 
-	-- Conteneurs FIXES, posés dans le monde et jamais cassés par la turtle.
-	-- N'importe quel inventaire fait l'affaire, puisqu'on ne fait qu'y déposer.
-	depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate" },
+	-- Conteneurs FIXES : REPLI par motif de nom, utilisé seulement quand l'API
+	-- peripheral ne voit pas le bloc. N'importe quel inventaire fait l'affaire,
+	-- puisqu'on ne fait qu'y déposer.
+	depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
+
+	-- Taille minimale d'un inventaire pour servir de dépôt, quand l'API
+	-- peripheral peut la donner. 27 est la capacité d'un coffre vanilla ;
+	-- en dessous, on a plutôt affaire au tampon d'une machine (un four en a 3,
+	-- un hopper 5) qu'à un conteneur de stockage.
+	depotMinSlots = 27,
 
 	trash = {},
 }
@@ -281,15 +288,63 @@ function M.isDepot(name)
 	return false
 end
 
+-- Côtés de l'API peripheral correspondant aux directions du turtle.
+local SIDES = { forward = "front", up = "top", down = "bottom" }
+
+--- Nombre de slots du conteneur voisin, via l'API peripheral, ou nil.
+--
+-- C'est la voie fiable : elle répond « est-ce un inventaire, et de quelle
+-- taille » sans rien savoir des identifiants de mods. Mais elle n'est pas
+-- garantie sur un turtle, où left et right sont réservés aux upgrades -- d'où
+-- le repli sur les motifs de nom, et le pcall systématique.
+local function peripheralSlots(where)
+	if type(peripheral) ~= "table" then return nil end
+	local side = SIDES[where or "forward"]
+	if not side then return nil end
+
+	local ok, present = pcall(peripheral.isPresent, side)
+	if not ok or not present then return nil end
+
+	local isInventory = false
+	if peripheral.hasType then
+		local okType, res = pcall(peripheral.hasType, side, "inventory")
+		isInventory = okType and res == true
+	end
+	if not isInventory then
+		local okType, kind = pcall(peripheral.getType, side)
+		isInventory = okType and kind == "inventory"
+	end
+	if not isInventory then return nil end
+
+	local okSize, size = pcall(peripheral.call, side, "size")
+	if not okSize or type(size) ~= "number" then return nil end
+	return size
+end
+
 --- Y a-t-il un conteneur fixe dans cette direction ?
+--
 -- On INSPECTE au lieu de tenter un dépôt : turtle.drop() réussit aussi quand
 -- il n'y a rien en face, en faisant simplement tomber l'objet au sol. Sans
 -- cette vérification, « déposer dans le coffre » et « perdre son butin » sont
 -- indiscernables.
+--
+-- Le verdict vient de l'API peripheral quand elle voit le bloc : elle sait
+-- s'il expose un inventaire et combien de slots il a, ce qu'aucune liste de
+-- noms ne peut suivre d'un mod à l'autre. Le seuil écarte les machines, qui
+-- n'ont qu'un petit tampon -- un four en a 3, un hopper 5 -- là où un coffre
+-- vanilla en a 27.
+--
+-- @return present, nom du bloc, nombre de slots si connu
 function M.depotAt(where)
 	local seen, info = turtle[INSPECTS[where or "forward"]]()
-	if not seen or not info then return false end
-	return M.isDepot(info.name), info.name
+	local name = (seen and info) and info.name or nil
+	if not name then return false end
+
+	local slots = peripheralSlots(where)
+	if slots then
+		return slots >= (config.depotMinSlots or 27), name, slots
+	end
+	return M.isDepot(name), name
 end
 
 --- Pose le coffre, en vérifiant que la pose a réussi.
