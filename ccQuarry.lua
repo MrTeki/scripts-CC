@@ -1102,12 +1102,18 @@ ccInv.reset({
 })
 if not setup(args) then return end
 
--- Sauvegarde à CHAQUE mouvement, et pas seulement aux transitions d'état.
--- Sans cela, une interruption en plein déplacement laisse une position en
--- retard d'une cellule, et la reprise repart d'un point faux : tout le
--- chantier se décale. Avec un GPS le recalage corrigerait, mais on ne peut
--- pas compter dessus.
-ccNav.configure({ onMove = function() save() end })
+-- Sauvegarde à CHAQUE changement d'état suivi -- déplacement ET rotation --
+-- et pas seulement aux transitions de la machine.
+--
+-- Sans cela, la reprise repart d'un point faux et tout le chantier se décale.
+-- Le cas de la rotation est le plus vicieux : en quittant la partie, le jeu
+-- n'accorde qu'un tick à la turtle pour finir son itération. Si elle vient de
+-- pivoter sans que ce soit enregistré, elle rouvre la partie avec un cap
+-- erroné, et rien dans son état ne permet de s'en apercevoir.
+--
+-- Avec un GPS le recalage corrigerait la position, mais pas le cap sans un
+-- déplacement d'essai -- et on ne peut de toute façon pas compter sur le GPS.
+ccNav.configure({ onChange = function() save() end })
 
 setupUi()
 setupNet()

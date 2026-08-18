@@ -428,6 +428,38 @@ H.case("Ctrl+T interrompt proprement et conserve la sauvegarde", function()
 	H.ok(fs.exists("startup.lua"), "reprise au reboot conservee")
 end)
 
+H.case("le cap sauvegarde suit CHAQUE rotation", function()
+	-- Bug observe en jeu : au rechargement de la partie, la turtle se trompait
+	-- de cap. La sauvegarde etait cablee sur les seuls deplacements, alors
+	-- qu'une rotation change l'etat tout autant. En quittant la partie, le jeu
+	-- n'accorde qu'un tick a la turtle : ce qui n'est pas enregistre est perdu.
+	terrain({ width = 3, depth = 3, height = 3 })
+
+	local ccNav = require("ccNav")
+	local ecarts, rotations = 0, 0
+
+	local function verifie(nom, vraie)
+		return function(...)
+			local r = vraie(...)
+			rotations = rotations + 1
+			local sauve = textutils.unserialize(mock.getFile("ccquarry.save") or "")
+			local dir = sauve and sauve.data and sauve.data.pos and sauve.data.pos.dir
+			if dir ~= mock.getTurtle().dir then ecarts = ecarts + 1 end
+			return r
+		end
+	end
+
+	local vraiR, vraiL = ccNav.turnRight, ccNav.turnLeft
+	ccNav.turnRight = verifie("R", vraiR)
+	ccNav.turnLeft = verifie("L", vraiL)
+
+	run("3", "3", "3")
+	ccNav.turnRight, ccNav.turnLeft = vraiR, vraiL
+
+	H.ok(rotations > 3, rotations .. " rotations observees")
+	H.eq(ecarts, 0, ecarts .. " rotations laissant un cap sauvegarde faux")
+end)
+
 H.case("la position est sauvegardee a chaque mouvement", function()
 	-- Aux seules transitions d'état, une interruption en plein déplacement
 	-- laisse une position en retard d'une cellule, et la reprise décale tout.

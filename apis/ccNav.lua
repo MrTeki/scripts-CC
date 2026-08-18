@@ -99,6 +99,18 @@ local function opts(o)
 	return merged
 end
 
+--- Signale un changement d'état suivi : position OU cap.
+--
+-- Le crochet s'appelait onMove, et ne se déclenchait que sur les déplacements.
+-- Les rotations changeaient `dir` sans rien notifier, donc sans être
+-- sauvegardées : au rechargement de la partie, la turtle repartait avec un cap
+-- faux, et tout le chantier était de travers. En quittant la partie, le jeu
+-- n'accorde qu'un tick à la turtle pour finir son itération -- la sauvegarde
+-- doit donc suivre CHAQUE changement, rotation comprise.
+local function notify()
+	if config.onChange then config.onChange(ccVec.copy(pos)) end
+end
+
 local function applyMove(where)
 	if where == "up" then
 		pos.z = pos.z + 1
@@ -109,7 +121,7 @@ local function applyMove(where)
 		pos.x, pos.y = pos.x + dx, pos.y + dy
 	end
 	stats.moves = stats.moves + 1
-	if config.onMove then config.onMove(ccVec.copy(pos)) end
+	notify()
 end
 
 -- ---------------------------------------------------------------------------
@@ -118,7 +130,9 @@ end
 
 --- Réinitialise position, compteurs et configuration.
 -- @param o  { tries, dig, attack, order,
---            onMove = function(pos),      appelé après chaque mouvement réussi
+--            onChange = function(pos),    appelé après CHAQUE changement de
+--                                         position ou de cap, rotations
+--                                         comprises
 --            canMove = function(where) }  garde : retourner false interdit le
 --                                         mouvement (réserve de carburant)
 function M.reset(o)
@@ -148,6 +162,7 @@ function M.position() return ccVec.copy(pos) end
 function M.setPosition(p)
 	pos.x, pos.y, pos.z = p.x, p.y, p.z
 	if p.dir then pos.dir = p.dir % 4 end
+	notify()
 end
 
 function M.stats()
@@ -260,7 +275,7 @@ function M.back()
 	local dx, dy = ccVec.delta(pos.dir)
 	pos.x, pos.y = pos.x - dx, pos.y - dy
 	stats.moves = stats.moves + 1
-	if config.onMove then config.onMove(ccVec.copy(pos)) end
+	notify()
 	return true
 end
 
@@ -276,6 +291,7 @@ function M.turnRight()
 	turtle.turnRight()
 	pos.dir = ccVec.turnRight(pos.dir)
 	stats.turns = stats.turns + 1
+	notify()
 	return true
 end
 
@@ -283,6 +299,7 @@ function M.turnLeft()
 	turtle.turnLeft()
 	pos.dir = ccVec.turnLeft(pos.dir)
 	stats.turns = stats.turns + 1
+	notify()
 	return true
 end
 

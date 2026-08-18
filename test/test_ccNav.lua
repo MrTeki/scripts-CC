@@ -208,10 +208,10 @@ H.case("garde canMove : denied, sans mouvement", function()
 	H.eq(mock.getTurtle().x, 0, "le turtle n'a pas bougé")
 end)
 
-H.case("onMove reçoit la position après chaque mouvement réussi", function()
+H.case("onChange reçoit la position après chaque mouvement réussi", function()
 	fresh()
 	local vues = {}
-	ccNav.configure({ onMove = function(p) vues[#vues + 1] = p.x .. "," .. p.y .. "," .. p.z end })
+	ccNav.configure({ onChange = function(p) vues[#vues + 1] = p.x .. "," .. p.y .. "," .. p.z end })
 
 	ccNav.forward()
 	ccNav.up()
@@ -223,6 +223,54 @@ end)
 -- ---------------------------------------------------------------------------
 -- Rotation
 -- ---------------------------------------------------------------------------
+
+H.case("onChange se déclenche AUSSI sur les rotations", function()
+	-- Bug observé en jeu : au rechargement de la partie, la turtle repartait
+	-- avec un cap faux. Le crochet s'appelait onMove et ne voyait que les
+	-- déplacements ; les rotations changeaient dir sans rien notifier, donc
+	-- sans être sauvegardées. En quittant la partie, le jeu n'accorde qu'un
+	-- tick à la turtle : tout changement non notifié est perdu.
+	fresh()
+	local caps = {}
+	ccNav.configure({ onChange = function(p) caps[#caps + 1] = p.dir end })
+
+	ccNav.turnRight()
+	ccNav.turnRight()
+	ccNav.turnLeft()
+
+	H.eq(#caps, 3, "une notification par rotation")
+	H.eq(caps[1], 1, "après le premier quart de tour")
+	H.eq(caps[2], 2, "après le second")
+	H.eq(caps[3], 1, "après le retour à gauche")
+end)
+
+H.case("le cap notifié correspond toujours au cap réel", function()
+	-- L'invariant qui compte pour la reprise : ce qui est notifié -- donc
+	-- sauvegardé -- ne doit jamais differer de l'orientation physique.
+	fresh()
+	local dernier
+	ccNav.configure({ onChange = function(p) dernier = p.dir end })
+
+	for _, t in ipairs({ "R", "R", "L", "L", "L", "R" }) do
+		if t == "R" then ccNav.turnRight() else ccNav.turnLeft() end
+		H.eq(dernier, mock.getTurtle().dir, "cap notifié après " .. t)
+	end
+
+	ccNav.turnTo(3)
+	H.eq(dernier, mock.getTurtle().dir, "cap notifié après turnTo")
+
+	ccNav.turnAround()
+	H.eq(dernier, mock.getTurtle().dir, "cap notifié après demi-tour")
+end)
+
+H.case("setPosition notifie, pour que le recalage soit enregistré", function()
+	fresh()
+	local vues = 0
+	ccNav.configure({ onChange = function() vues = vues + 1 end })
+
+	ccNav.setPosition({ x = 3, y = 4, z = -5, dir = 2 })
+	H.eq(vues, 1, "recalage notifié")
+end)
 
 H.case("la direction suivie ne diverge jamais de la direction réelle", function()
 	-- Downwards écrivait lastDir avant de décrémenter dir ; Upwards associait
@@ -302,7 +350,7 @@ H.case("goTo respecte l'ordre des axes", function()
 	fresh()
 	-- En ordre zxy, la montée est faite avant tout déplacement horizontal.
 	local trace = {}
-	ccNav.configure({ onMove = function(p) trace[#trace + 1] = p.z end })
+	ccNav.configure({ onChange = function(p) trace[#trace + 1] = p.z end })
 	ccNav.goTo({ x = 2, y = 0, z = 3 }, { order = "zxy" })
 
 	H.eq(trace[1], 1, "premier mouvement en Z")
