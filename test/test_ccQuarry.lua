@@ -161,6 +161,48 @@ H.case("le journal enregistre l'etat terminal, pas une fausse erreur", function(
 	H.eq(trace:find("Etat inconnu", 1, true), nil, "aucun état inconnu")
 end)
 
+H.case("le rebut n'est pas jete a chaque cellule", function()
+	-- Observe en jeu : la turtle parcourait ses 16 slots apres chaque cellule,
+	-- soit trois blocs mines, ce qui coutait plus cher que le minage. Un select
+	-- et un drop par pile, plus un select et un refuel(0) par pile pour repérer
+	-- le combustible a proteger -- toutes des commandes a un tick.
+	terrain({ width = 3, depth = 3, height = 6 })
+
+	local ccInv = require("ccInv")
+	local appels = 0
+	local vrai = ccInv.dumpTrash
+	ccInv.dumpTrash = function(...) appels = appels + 1 return vrai(...) end
+
+	run("3", "3", "6")
+	ccInv.dumpTrash = vrai
+
+	-- 3 x 3 x 2 couches = 18 cellules. L'ancienne version appelait dumpTrash
+	-- 18 fois ; desormais seulement quand la place manque, plus le vidage final.
+	H.ok(appels <= 3, "dumpTrash appele " .. appels .. " fois, au plus 3 attendu")
+end)
+
+H.case("la selection repart du premier slot avant chaque cellule", function()
+	terrain({ width = 3, depth = 2, height = 3 })
+
+	-- 3 x 2 sur une couche = 6 cellules. Au-dela, les digDown viennent de la
+	-- finition (degagement sous la turtle pour poser le coffre), pas du minage.
+	local CELLULES = 6
+	local vus = {}
+	local vraiDig = turtle.digDown
+	turtle.digDown = function()
+		if #vus < CELLULES then vus[#vus + 1] = turtle.getSelectedSlot() end
+		return vraiDig()
+	end
+
+	run("3", "2", "3")
+	turtle.digDown = vraiDig
+
+	H.eq(#vus, CELLULES, "toutes les cellules observees")
+	for i, slot in ipairs(vus) do
+		H.eq(slot, 1, "cellule " .. i .. " : minage depuis le premier slot")
+	end
+end)
+
 H.case("le rebut part au sol et n'engorge pas l'inventaire", function()
 	terrain({ width = 3, depth = 3, height = 6 })
 	run("3", "3", "6")
@@ -342,8 +384,17 @@ H.case("le coffre fixe est trouve derriere, a gauche ou au-dessus", function()
 		run("2", "2", "3")
 		local coffre = mock.getBlock(p[1], p[2], p[3]).inventory
 		local label = table.concat(p, ",")
-		H.ok(coffre[1], "coffre en " .. label)
-		H.eq(coffre[1].name, "minecraft:iron_ore", label .. " : minerai depose")
+
+		local trouve = false
+		for _, pile in pairs(coffre) do
+			if pile.name == "minecraft:iron_ore" then trouve = true end
+		end
+		H.eq(trouve, true, label .. " : minerai depose")
+		-- Le rebut ne doit PAS finir dans le depot : avec le coffre au-dessus
+		-- et trashWhere = "up", il y atterrissait.
+		for _, pile in pairs(coffre) do
+			H.eq(pile.name ~= "minecraft:stone", true, label .. " : pas de rebut au depot")
+		end
 	end
 end)
 

@@ -475,12 +475,23 @@ local function tidyInventory()
 end
 
 local function needsService()
+	-- Le ménage n'a lieu QUE lorsque la place vient à manquer.
+	--
+	-- Le faire à chaque cellule coûtait bien plus cher que le minage lui-même :
+	-- dumpTrash paie un select et un drop par pile, et protectedSlots un select
+	-- plus un refuel(0) par pile occupée -- toutes des commandes à un tick.
+	-- Avec dix slots pleins, cela faisait une vingtaine de ticks de ménage pour
+	-- trois blocs minés.
+	--
+	-- Et ce n'est pas seulement moins cher : la liste de rebut n'a qu'un but,
+	-- éviter le trajet de retour. Il suffit donc de la vider juste avant que
+	-- l'inventaire ne force ce trajet. getItemCount étant immédiat, le test
+	-- ci-dessous, lui, ne coûte rien.
 	if ccInv.freeCount() <= 2 then
-		-- Le butin miné atterrit dans le slot sélectionné, que chaque
-		-- opération déplace : on se retrouve avec plusieurs piles partielles
-		-- du même bloc. On regroupe AVANT de conclure que c'est plein, sinon
-		-- la turtle rentre pour rien.
 		ccInv.compact()
+		if #CONFIG.trash > 0 then
+			ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
+		end
 	end
 
 	-- Un seul slot libre restant : le prochain bloc miné tomberait par terre.
@@ -569,9 +580,13 @@ STATES[S.MINING] = function()
 		return S.GO_TO_WORK
 	end
 
+	-- Avant de creuser : la sélection repart du premier slot, pour que le butin
+	-- s'empile densément au lieu d'atterrir là où la dernière opération avait
+	-- laissé la sélection.
+	ccInv.selectForMining()
+
 	if cell.digUp then ccNav.dig("up") end
 	if cell.digDown then ccNav.dig("down") end
-	ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
 
 	ctx.index = ctx.index + 1
 
@@ -664,6 +679,15 @@ end
 --   2. conteneur fixe autour de l'origine ;
 --   3. rien -- l'appelant décide alors d'attendre ou de jeter.
 -- @return "chest", "depot" ou nil
+--- Direction où jeter le rebut pendant un vidage.
+-- Jamais celle du conteneur : sinon le rebut y atterrit au lieu d'être jeté,
+-- ce qui annule tout l'intérêt de la liste. Le cas se présente dès que le
+-- dépôt fixe est au-dessus, la direction par défaut du rebut.
+local function trashAwayFrom(where)
+	if CONFIG.trashWhere ~= where then return CONFIG.trashWhere end
+	return where == "up" and "down" or "up"
+end
+
 local function serviceUnload(refuel)
 	-- Rangement AVANT le vidage : le coffre et le carburant retrouvent leurs
 	-- emplacements, et les piles partielles sont regroupées. Sans cela, du
@@ -673,7 +697,7 @@ local function serviceUnload(refuel)
 	tidyInventory()
 
 	if placeChest() then
-		local ok, reason, slot = ccInv.unload("down", { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
+		local ok, reason, slot = ccInv.unload("down", { trashWhere = trashAwayFrom("down"), protect = protectedSlots() })
 		if not ok then
 			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
 		end
@@ -691,7 +715,7 @@ local function serviceUnload(refuel)
 
 	local where = findDepot()
 	if where then
-		local ok, reason, slot = ccInv.unload(where, { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
+		local ok, reason, slot = ccInv.unload(where, { trashWhere = trashAwayFrom(where), protect = protectedSlots() })
 		if not ok then
 			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
 		end
@@ -716,7 +740,7 @@ STATES[S.SERVICE] = function()
 		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
 		ccInv.dumpTrash(CONFIG.trashWhere, { protect = protectedSlots() })
 		if CONFIG.dropWhenNoChest then
-			ccInv.unload("forward", { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
+			ccInv.unload("forward", { trashWhere = trashAwayFrom("forward"), protect = protectedSlots() })
 		end
 	end
 
@@ -769,7 +793,7 @@ STATES[S.FINISHING] = function()
 		-- Pas de ravitaillement ici : le chantier est fini.
 		if not serviceUnload(false) then
 			if CONFIG.dropWhenNoChest then
-				ccInv.unload("forward", { trashWhere = CONFIG.trashWhere, protect = protectedSlots() })
+				ccInv.unload("forward", { trashWhere = trashAwayFrom("forward"), protect = protectedSlots() })
 			else
 				-- Le chantier est fini mais la turtle tient encore du butin :
 				-- elle attend qu'on la vide plutôt que de l'abandonner au sol.

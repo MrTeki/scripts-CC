@@ -164,6 +164,21 @@ function M.compact()
 	return moves
 end
 
+--- Ramène la sélection sur le premier slot, avant de miner.
+--
+-- CC range le butin dans le slot SÉLECTIONNÉ en priorité, puis balaie à partir
+-- du début. Repartir toujours du même slot bas garantit donc un empilement
+-- dense. Sans cela, la sélection héritée de la dernière opération éparpille
+-- des piles partielles du même bloc un peu partout.
+--
+-- getSelectedSlot est immédiat, select coûte un tick : on ne le paie que si la
+-- sélection a réellement bougé.
+function M.selectForMining(slot)
+	slot = slot or 1
+	if turtle.getSelectedSlot() ~= slot then turtle.select(slot) end
+	return slot
+end
+
 --- Déplace le contenu de `from` vers `to`, en libérant `to` si nécessaire.
 -- @return true, ou false + raison
 function M.moveToSlot(from, to)

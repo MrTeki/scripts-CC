@@ -200,6 +200,46 @@ H.case("compact ne mélange jamais deux objets différents", function()
 	H.eq(ccInv.count(3), 10, "charbon de bois intact")
 end)
 
+H.case("selectForMining ramène la sélection au premier slot", function()
+	fresh()
+	turtle.select(9)
+	H.eq(ccInv.selectForMining(), 1, "slot retenu")
+	H.eq(turtle.getSelectedSlot(), 1, "sélection ramenée")
+end)
+
+H.case("selectForMining ne coûte rien si la sélection n'a pas bougé", function()
+	-- select est une commande à un tick, getSelectedSlot est immédiat : on ne
+	-- paie que lorsque c'est nécessaire.
+	fresh()
+	turtle.select(1)
+	local selects = 0
+	local vrai = turtle.select
+	turtle.select = function(s) selects = selects + 1 return vrai(s) end
+
+	ccInv.selectForMining()
+	ccInv.selectForMining()
+	turtle.select = vrai
+
+	H.eq(selects, 0, "aucun select superflu")
+end)
+
+H.case("miner depuis le premier slot empile densément", function()
+	-- Sans remise à zéro de la sélection, le butin atterrit là où la dernière
+	-- opération l'avait laissée, et le même bloc se retrouve éparpillé.
+	fresh()
+	for z = 0, 5 do mock.setBlock(1, 0, z, "minecraft:stone") end
+
+	for _ = 1, 6 do
+		turtle.select(10)          -- comme après une opération quelconque
+		ccInv.selectForMining()
+		turtle.dig()
+		mock.setBlock(1, 0, 0, "minecraft:stone")
+	end
+
+	H.eq(ccInv.count(1), 6, "tout dans le premier slot")
+	H.eq(ccInv.freeCount(), 15, "un seul slot occupé")
+end)
+
 H.case("moveToSlot transfère et vide le slot source", function()
 	fresh()
 	mock.setSlot(4, "minecraft:coal", 30)
