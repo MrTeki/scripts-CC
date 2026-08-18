@@ -45,9 +45,9 @@ function M.reset(opts)
 	opts = opts or {}
 	files, dirs, writeFaults, truncateFaults = {}, { [""] = true }, {}, {}
 	world, entities, peripherals, gpsOrigin, ground = {}, {}, {}, nil, {}
-	-- Les blocs adjacents sont-ils visibles par l'API peripheral ? Sur un vrai
-	-- turtle, left et right sont reserves aux upgrades, et il n'est pas acquis
-	-- qu'il voie ses voisins. Les deux cas doivent donc etre testables.
+	-- Les blocs adjacents sont-ils visibles par l'API peripheral ? Oui sur
+	-- CC:Tweaked recent, non sur les versions plus anciennes ou seuls left et
+	-- right etaient exposes. Les deux cas doivent rester testables.
 	adjacentPeripherals = true
 	rednetState = { open = nil, sent = {}, inbox = {} }
 	httpRoutes, httpLog, httpEnabled = {}, {}, true

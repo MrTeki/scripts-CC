@@ -184,8 +184,9 @@ H.case("un conteneur d'un mod inconnu est reconnu par sa taille", function()
 end)
 
 H.case("sans peripheral sur les blocs voisins, repli sur les motifs", function()
-	-- Sur un turtle, left et right sont réservés aux upgrades : il n'est pas
-	-- acquis qu'il voie ses voisins. Le repli doit rester fonctionnel.
+	-- CC:Tweaked récent expose les blocs voisins au turtle, mais pas les
+	-- versions plus anciennes, où left et right étaient les seuls côtés
+	-- accessibles. Le repli doit rester fonctionnel.
 	fresh()
 	mock.setAdjacentPeripherals(false)
 

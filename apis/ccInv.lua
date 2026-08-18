@@ -294,9 +294,13 @@ local SIDES = { forward = "front", up = "top", down = "bottom" }
 --- Nombre de slots du conteneur voisin, via l'API peripheral, ou nil.
 --
 -- C'est la voie fiable : elle répond « est-ce un inventaire, et de quelle
--- taille » sans rien savoir des identifiants de mods. Mais elle n'est pas
--- garantie sur un turtle, où left et right sont réservés aux upgrades -- d'où
--- le repli sur les motifs de nom, et le pcall systématique.
+-- taille » sans rien savoir des identifiants de mods.
+--
+-- Vérifié en jeu : sur CC:Tweaked récent, un turtle voit bien ses blocs
+-- voisins comme des périphériques -- peripheral.getMethods("front") renvoie
+-- les méthodes du conteneur. Ce n'était pas le cas des versions plus
+-- anciennes, où left et right étaient les seuls côtés exposés, d'où le pcall
+-- systématique et le repli sur les motifs de nom.
 local function peripheralSlots(where)
 	if type(peripheral) ~= "table" then return nil end
 	local side = SIDES[where or "forward"]
