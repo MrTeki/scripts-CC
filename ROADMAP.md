@@ -52,13 +52,20 @@ Les deux se tiennent : le second alimente le premier.
 
 ## Migration des autres scripts
 
-`ccChopper`, `ccStairs`, `ccFarm`, `ccRemote`, `ccInventory`. Chacun perd 150 à
-300 lignes et récupère au passage les corrections déjà faites :
+`ccStairs`, `ccFarm`, `ccRemote`, `ccInventory`. Chacun récupère au passage les
+corrections déjà faites :
 
 - `getFuelLevel()` qui renvoie `"unlimited"` et fait planter les comparaisons ;
 - `drawBar` centré, que `ccInventory` a et que `ccRemote` n'a jamais reçu ;
 - sauvegarde atomique et versionnée ;
 - options éditables en jeu.
+
+Leçon de la migration de `ccChopper` : **le gain n'est pas en lignes.** Le
+code utile est passé de 772 à 784 lignes, dont 30 de gabarit d'options. Le
+mouvement, l'inventaire, le carburant et la sauvegarde ont bien fondu, mais
+l'amorce, les options éditables, l'interface à boutons et le trajet de secours
+n'existaient pas avant et reprennent la place. Le gain réel est ailleurs : neuf
+états nommés au lieu de trois drapeaux, et plus une seule boucle non bornée.
 
 `ccRemote` mérite une attention particulière : sa moitié turtle tourne dans un
 `while true` bloquant, donc incompatible avec un script de travail. `ccNet`
@@ -142,6 +149,20 @@ Ce ne sont pas des bugs, mais des contraintes assumées, à connaître.
   miné avec le reste.
 - **`gpsHeading` coûte 2 carburant** et exige une case libre adjacente : le cap
   ne se déduit que d'un déplacement réel.
+- **`ccChopper` ne fait pas de recherche de chemin non plus.** Le retour
+  nominal déroule la récursion d'abattage, ce qui est exact. Après un
+  redémarrage cette pile est perdue, et le trajet de secours monte au-dessus de
+  la canopée avant de rejoindre l'origine : correct dans une forêt, mais mis en
+  échec par un surplomb.
+- **`ccChopper` n'alimente le four que par le conteneur.** Une turtle ne peut
+  pas viser un slot précis d'un voisin — `turtle.drop()` laisse le conteneur
+  choisir, et une bûche est à la fois fondable et combustible, donc ce choix est
+  indéterminé. Le four et le conteneur doivent donc être tous deux contre la
+  turtle.
+- **Le bois est exclu de la protection du carburant.** Dans une ferme à bois le
+  butin *est* du combustible : `ccFuel.protectSlots` garderait la récolte
+  entière. `ccChopper` ne protège que le combustible non ligneux, et brûle les
+  bûches explicitement quand il en a besoin.
 - **La marge `spareSlots` n'est pas une prévision.** Prévoir si le prochain bloc
   tiendra est impossible : `inspect()` donne le nom du bloc, pas celui du butin,
   et un même bloc peut lâcher plusieurs objets différents.
@@ -160,6 +181,12 @@ Ce qui n'a jamais tourné en conditions réelles, et qu'un essai devrait couvrir
   une pile de charbon dans le conteneur, et un chantier profond.
 - **Le ravitaillement au conteneur fixe**, ajouté en même temps.
 - **Le mode `dropWhenNoChest = true`**, jamais exercé en jeu.
+- **`ccChopper` en entier.** Il passe 30 cas sous le mock, dont l'abattage
+  complet, le retour, le four et la reprise, mais n'a jamais tourné en jeu
+  depuis la migration. À surveiller en priorité : la reconnaissance du four par
+  `peripheral.getNames()`, et `chest.pushItems(<côté du four>, slot, n, 1)` —
+  c'est-à-dire qu'un conteneur accepte bien un nom de côté relatif au turtle
+  pour désigner sa cible.
 
 Confirmé depuis la rédaction de cette liste :
 

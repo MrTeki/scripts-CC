@@ -1,870 +1,1254 @@
-local tArgs = { ... }
-local monitor = term.current()
-local sizeX,sizeY = monitor.getSize()
+-- ccChopper par Teki
+--
+-- Ferme à arbres : plante, attend la pousse, abat, rapporte, et alimente au
+-- passage un four à charbon de bois.
+--
+--   ccChopper              ferme sans fin ; reprend le travail en cours
+--   ccChopper <n>          abat n arbres puis s'arrête
+--   ccChopper del          oublie le travail en cours
+--   ccChopper config       crée ou affiche les options
+--   ccChopper update       met les APIs à jour
+--
+-- Conventions (voir README) : X / Y horizontaux, Z vertical, direction 0 = +X.
+-- L'origine est la position de départ de la turtle, qui doit REGARDER LA CASE
+-- DE PLANTATION. L'arbre pousse donc en (1, 0, 0).
+--
+-- Placement : un conteneur contre l'origine (derrière, sur un côté, au-dessus
+-- ou en dessous), et pour le charbon de bois un four sur un autre côté.
+-- Le conteneur sert à la fois de dépôt du butin, de réserve de saplings et de
+-- source de carburant.
+--
+-- Deux principes propres à ce script, qui expliquent la forme du code :
+--
+--   1. On ne creuse QUE du bois et des feuilles. ccNav ne sait pas filtrer par
+--      bloc -- son option `dig` est un booléen -- donc tous ses mouvements sont
+--      appelés avec `dig = false` et la décision de casser reste ici. Sans
+--      cela, un trajet raserait le décor, le coffre et le four.
+--
+--   2. L'abattage est RÉCURSIF, et chaque appel revient sur sa case d'appel.
+--      La pile d'appels Lua est donc le chemin de retour, exact et gratuit.
+--      L'ancienne version essayait de revenir en ligne droite à travers un
+--      arbre à moitié coupé, avec une pile de positions qui n'était jamais
+--      alimentée -- l'état « chopping » qui la remplissait n'existait pas.
 
-local makeCharcoal = false
-local fuelPriority = {
-	"minecraft:stick",
-	"minecraft:charcoal",
-	"minecraft:oak_log",
+-- ---------------------------------------------------------------------------
+-- Amorce
+-- ---------------------------------------------------------------------------
+-- Un SEUL point d'entrée en dur : l'URL du dépôt. La logique vit dans ccBoot,
+-- pour qu'une évolution du mécanisme ne demande pas de rééditer les scripts
+-- déjà installés.
+
+-- Pointe sur la branche de refonte le temps des essais. À rebasculer sur
+-- .../scripts-CC/main/ une fois refonte/apis-socle fusionnée.
+local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/refonte/apis-socle/"
+
+local NEEDS = {
+	ccVec = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
+	ccFuel = 1, ccSave = 1, ccUi = 1,
 }
-local origin = {X = 0, Y = 0, Z = 0, direction = 0}
-local curPosition = {
-    X = 0,
-    Y = 0,
-    Z = 0,
-    direction = 0
-}
-local lastPosition = {
-    X = 0,
-    Y = 0,
-    Z = 0,
-    direction = 0
-}
-local targetPosition = {
-    X = 0,
-    Y = 0,
-    Z = 0,
-    direction = nil
-}
-local chestSide = nil
-local furnaceSide = nil
-local currentState = "setup"
-local lastPositionStack = {}
 
--- Logging
+local args = { ... }
 
-local lastMsg = ""
-local lastMsgCount = 0
-local function pmsg(msg)
-	if lastMsg == msg then
-		lastMsgCount = lastMsgCount + 1
-		msg = msg .. " " .. lastMsgCount
-	else
-		lastMsg = msg
-		lastMsgCount = 0
-		monitor.scroll(1)
-	end
-	monitor.setCursorPos(1,13)
-	monitor.clearLine()
-	monitor.write(msg)
-end
+local function boot()
+	package.path = "/apis/?.lua;apis/?.lua;" .. package.path
 
--- Utility
-
-local function indexOf(array, needle)
-    for index, value in ipairs(array) do
-        if value == needle then
-            return index
-        end
-    end
-	return false
-end
-
-local function copyPosition(position)
-    local newPosition = {}
-	newPosition.X = position.X
-	newPosition.Y = position.Y
-	newPosition.Z = position.Z
-	newPosition.direction = position.direction
-	return newPosition
-end
-
-local function arePositionEquals(pos1, pos2, checkDirection)
-	if pos1.X == pos2.X and pos1.Y == pos2.Y and pos1.Z == pos2.Z then
-		if checkDirection then
-			return pos1.direction == pos2.direction
-		else
-			return true
+	if not fs.exists("apis/ccBoot.lua") and not pcall(require, "ccBoot") then
+		if not http then
+			error("apis/ccBoot.lua manquant et HTTP indisponible.\n"
+				.. "Copier le dossier apis/ depuis " .. REPO, 0)
 		end
+		local res = http.get(REPO .. "apis/ccBoot.lua")
+		if not res then error("Telechargement de ccBoot impossible : " .. REPO, 0) end
+		local body = res.readAll()
+		res.close()
+		fs.makeDir("apis")
+		local f = fs.open("apis/ccBoot.lua", "w")
+		f.write(body)
+		f.close()
 	end
-	return false
+
+	local ok, result = require("ccBoot").ensure(REPO, NEEDS, { check = args[1] == "update" })
+	if not ok then error(result, 0) end
+	return result
 end
 
--- save / Load
+local installed = boot()
 
-local filePath = "ccchop.save"
+if args[1] == "update" then
+	if #installed == 0 then
+		print("APIs deja a jour.")
+	else
+		print("APIs installees : " .. table.concat(installed, ", "))
+	end
+	return
+end
+
+local ccVec  = require("ccVec")
+local ccNav  = require("ccNav")
+local ccInv  = require("ccInv")
+local ccFuel = require("ccFuel")
+local ccSave = require("ccSave")
+local ccUi   = require("ccUi")
+local ccConfig = require("ccConfig")
+
+-- ---------------------------------------------------------------------------
+-- Configuration
+-- ---------------------------------------------------------------------------
+
+local SAVE_PATH = "ccchop.save"       -- même nom qu'avant : les anciennes
+local SAVE_VERSION = 1                -- sauvegardes sont migrées, pas ignorées
+local LOG_PATH = "ccchop.log"
+local CONFIG_PATH = "ccchopper.cfg"
+
+local DEFAULTS = {
+	makeCharcoal = false,     -- alimenter un four avec une partie des bûches
+	chopLeaves = true,        -- casser aussi les feuilles, pour les saplings
+	fertilize = true,         -- utiliser la poudre d'os sur les jeunes pousses
+
+	growWait = 20,            -- secondes entre deux inspections d'une pousse
+	maxDepth = 96,            -- profondeur d'exploration depuis le tronc, en
+	                          -- nombre de cases enchaînées
+	maxHeight = 40,           -- plafond du trajet de secours, au-dessus de l'origine
+
+	keepFuel = 64,            -- combustible gardé à bord ; le reste est du butin
+	keepSaplings = 32,        -- saplings gardés à bord pour replanter
+	spareSlots = 2,           -- marge de slots libres avant de rentrer vider
+	fuelMargin = 128,         -- réserve en plus du retour : le chemin qui
+	                          -- déroule la récursion est plus long que la
+	                          -- distance à vol d'oiseau
+	fuelTopUp = 2000,         -- niveau visé lors d'un ravitaillement
+
+	-- Reconnaissance des blocs, par motif cherché dans l'identifiant. Une liste
+	-- de noms exacts ne peut pas suivre les essences de tous les mods, et
+	-- l'ancienne version codait « minecraft:oak_log » en dur à quatre endroits.
+	woodPatterns    = { "_log", "_stem", "_wood", "_hyphae" },
+	leafPatterns    = { "_leaves", "_wart_block" },
+	saplingPatterns = { "_sapling", "_propagule" },
+
+	-- Conteneurs FIXES acceptés comme dépôt, en repli quand l'API peripheral
+	-- ne voit pas le bloc voisin.
+	depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
+	depotMinSlots = 27,
+
+	-- Ce qui part par-dessus bord au lieu d'être rapporté. Les feuilles sont le
+	-- gros du volume ramassé, et n'ont d'intérêt que pour les saplings qu'elles
+	-- lâchent en tombant.
+	trash = {
+		"minecraft:oak_leaves",
+		"minecraft:birch_leaves",
+		"minecraft:spruce_leaves",
+		"minecraft:jungle_leaves",
+		"minecraft:acacia_leaves",
+		"minecraft:dark_oak_leaves",
+		"minecraft:mangrove_leaves",
+		"minecraft:cherry_leaves",
+	},
+}
+
+local CONFIG_TEMPLATE = [==[
+-- Options de ccChopper. Modifiable en jeu avec : edit ccchopper.cfg
+-- Supprimer ce fichier le regenere avec les valeurs par defaut.
+
+return {
+    -- Alimenter un four voisin pour produire du charbon de bois. Le four doit
+    -- etre contre la turtle, sur un autre cote que le conteneur : c'est le
+    -- CONTENEUR qui l'alimente, la turtle ne fait que commander le transfert.
+    makeCharcoal = false,
+
+    -- Casser aussi les feuilles. C'est ce qui rapporte les saplings, donc la
+    -- ferme s'auto-alimente ; en contrepartie l'abattage est bien plus long.
+    -- A false, la turtle ne suit que le bois.
+    chopLeaves = true,
+
+    -- Utiliser la poudre d'os sur les jeunes pousses, si la turtle en a.
+    fertilize = true,
+
+    -- Secondes entre deux inspections d'une pousse. L'ancienne version
+    -- inspectait 20 fois par seconde et vidait une pile de poudre d'os en
+    -- quelques secondes.
+    growWait = 20,
+
+    -- Garde-fou : profondeur d'exploration depuis le tronc, en nombre de
+    -- cases enchainees. Ce n'est pas un total de blocs casses : un arbre de
+    -- jungle en compte bien plus, mais aucune de ses cases n'est a 96 pas du
+    -- tronc.
+    maxDepth = 96,
+
+    -- Plafond du trajet de secours, en hauteur au-dessus de l'origine. Sert
+    -- quand la turtle doit rentrer apres un redemarrage, sans savoir par ou
+    -- elle est arrivee : elle passe par au-dessus de la canopee.
+    maxHeight = 40,
+
+    -- Combustible et saplings gardes a bord lors d'un vidage, en nombre
+    -- d'objets. Le surplus part au conteneur.
+    keepFuel = 64,
+    keepSaplings = 32,
+
+    -- Slots laisses libres avant de rentrer vider. C'est une MARGE : entre
+    -- deux verifications la turtle ramasse plusieurs blocs, et ce que
+    -- l'inventaire ne peut plus accueillir est perdu en silence.
+    spareSlots = 2,
+
+    -- Carburant garde en reserve en plus du retour, et niveau vise lors d'un
+    -- ravitaillement au conteneur.
+    fuelMargin = 128,
+    fuelTopUp = 2000,
+
+    -- Reconnaissance des blocs, par motif cherche dans l'identifiant. Ajouter
+    -- ici les essences d'un modpack : un motif suffit pour toute une famille.
+    woodPatterns    = { "_log", "_stem", "_wood", "_hyphae" },
+    leafPatterns    = { "_leaves", "_wart_block" },
+    saplingPatterns = { "_sapling", "_propagule" },
+
+    -- Conteneurs acceptes comme depot, en repli quand l'API peripheral ne voit
+    -- pas le bloc voisin.
+    depotPatterns = { "chest", "barrel", "shulker", "hopper", "drawer", "crate", "backpack" },
+    depotMinSlots = 27,
+
+    -- Jete a la volee au lieu d'etre rapporte. Vider la liste ( trash = {} )
+    -- pour tout conserver.
+    trash = {
+        "minecraft:oak_leaves",
+        "minecraft:birch_leaves",
+        "minecraft:spruce_leaves",
+        "minecraft:jungle_leaves",
+        "minecraft:acacia_leaves",
+        "minecraft:dark_oak_leaves",
+        "minecraft:mangrove_leaves",
+        "minecraft:cherry_leaves",
+    },
+}
+]==]
+
+local CONFIG = DEFAULTS
+
+-- États. Le nom de l'état EST l'état : les drapeaux currentState / makeCharcoal
+-- / needEmptying de l'ancienne version disparaissent.
+local S = {
+	CALIBRATE = "CALIBRAGE",
+	TEND      = "PLANTATION",
+	CHOP      = "ABATTAGE",
+	RETURN    = "RETOUR",
+	SERVICE   = "SERVICE",
+	AWAIT     = "ATTENTE",
+	PAUSED    = "PAUSE",
+	DONE      = "TERMINE",
+	FAILED    = "ERREUR",
+}
+
+-- La case de plantation : devant l'origine, au même niveau.
+local TREE = { x = 1, y = 0, z = 0 }
+local ORIGIN = { x = 0, y = 0, z = 0, dir = 0 }
+
+local ctx = {
+	state = S.CALIBRATE,
+	reason = nil,
+	trees = 0,           -- arbres abattus depuis le lancement
+	target = nil,        -- nombre demandé, ou nil pour une ferme sans fin
+	logs = 0,            -- blocs cassés sur le dernier arbre
+	stopped = false,
+	pending = {},        -- commandes en attente, jamais exécutées à la réception
+}
+
+local store
+
+-- ---------------------------------------------------------------------------
+-- Journal
+-- ---------------------------------------------------------------------------
+
+-- L'écran d'un turtle fait 13 lignes et se vide au premier nettoyage : un
+-- message d'erreur qui n'existe que là est perdu au moment où il sert.
+local function journal(msg)
+	msg = tostring(msg)
+	pcall(ccUi.log, msg)
+
+	local handle = fs.open(LOG_PATH, "a")
+	if not handle then return end
+	handle.write(("[%.1f] %s | %s\n"):format(os.clock(), ctx.state or "?", msg))
+	handle.close()
+end
+
+--- Attend un événement, en traitant Ctrl+T comme une demande d'arrêt propre.
+local function waitEvent(filter)
+	local event = { os.pullEventRaw(filter) }
+	if event[1] == "terminate" then
+		ctx.interrupted = true
+		ctx.stopped = true
+	end
+	return table.unpack(event)
+end
+
+-- ---------------------------------------------------------------------------
+-- Fichier de démarrage
+-- ---------------------------------------------------------------------------
+
+local STARTUP = 'shell.run("ccChopper")\n'
+
+local function startupContent()
+	if not fs.exists("startup.lua") then return nil end
+	local f = fs.open("startup.lua", "r")
+	local content = f.readAll()
+	f.close()
+	return content
+end
+
+local function installStartup()
+	local current = startupContent()
+	if current == STARTUP then return end
+
+	if current then
+		if not fs.exists("startup.old") then fs.move("startup.lua", "startup.old") end
+		fs.delete("startup.lua")
+	end
+
+	local f = fs.open("startup.lua", "w")
+	f.write(STARTUP)
+	f.close()
+end
+
+local function removeStartup()
+	-- On ne retire que le nôtre.
+	if startupContent() == STARTUP then fs.delete("startup.lua") end
+	if not fs.exists("startup.lua") and fs.exists("startup.old") then
+		fs.move("startup.old", "startup.lua")
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Sauvegarde
+-- ---------------------------------------------------------------------------
+
+-- Migration depuis le format d'origine : sept index numériques, positions en
+-- X / Y / Z / direction majuscules. Seule la position a encore un sens ; la
+-- pile de trajet qu'il stockait était toujours vide, faute d'un état qui
+-- l'alimente.
+local MIGRATIONS = {
+	[0] = function(old)
+		local p = old[1] or {}
+		return {
+			pos = ccVec.new(p.X or 0, p.Y or 0, p.Z or 0, p.direction or 0),
+			state = S.RETURN,
+			reason = "reprise",
+		}
+	end,
+}
+
 local function save()
-	if currentState == "chopping" then
-		lastPositionStack[#lastPositionStack+1] = copyPosition(curPosition)
-		pmsg("new stack")
-		-- lastPositionStack[#lastPositionStack].direction = (curPosition.direction + 2) % 4
-	elseif currentState == "going_back" and #lastPositionStack > 1 then
-		if curPosition.X == lastPositionStack[#lastPositionStack].X and curPosition.Y == lastPositionStack[#lastPositionStack].Y and curPosition.Z == lastPositionStack[#lastPositionStack].Z then
-			lastPositionStack[#lastPositionStack] = nil
-			pmsg("stack removed")
-		end
-	end
-	-- disable save
-	if true then
-		return nil
-	end
-	if curPosition.direction > 3 then
-		curPosition.direction = curPosition.direction - 4
-	elseif curPosition.direction < 0 then
-		curPosition.direction = curPosition.direction + 4
-	end
-	local savedFile = fs.open(filePath, "w")
-	local savedValues = {
-		[1] = curPosition,
-		[2] = lastPosition,
-		[3] = targetPosition,
-		[4] = chestSide,
-		[5] = furnaceSide,
-		[6] = currentState,
-		[7] = lastPositionStack,
-	}
-	savedFile.write(textutils.serialize(savedValues))
-	savedFile.flush()
-	savedFile.close()
-end
-local function load()
-	if fs.exists(filePath) and fs.getSize(filePath) > 0 and #tArgs == 0 then
-		local savedFile = fs.open(filePath, "r")
-		local savedValues = textutils.unserialize(savedFile.readAll())
-
-        curPosition = savedValues[1]
-        lastPosition = savedValues[2]
-        targetPosition = savedValues[3]
-        chestSide = savedValues[4]
-        furnaceSide = savedValues[5]
-        currentState = savedValues[6]
-		lastPositionStack = savedValues[7]
-
-		savedFile.close()
-    end
-end
-load()
-save()
-
--- Setup
-
-local function findPeripherals()
-	chestSide = nil
-	furnaceSide = nil
-	local sides = peripheral.getNames()
-	for i=1, #sides do
-		if peripheral.getType(sides[i]) == "minecraft:chest" then
-			chestSide = sides[i]
-        elseif peripheral.getType(sides[i]) == "minecraft:furnace" then
-            furnaceSide = sides[i]
-		end
-	end
-	return chestSide ~= nil and furnaceSide ~= nil
+	store.write({
+		state = ctx.state,
+		reason = ctx.reason,
+		trees = ctx.trees,
+		target = ctx.target,
+		pos = ccNav.position(),
+	})
 end
 
--- Block/Item Check
+-- ---------------------------------------------------------------------------
+-- Reconnaissance des blocs
+-- ---------------------------------------------------------------------------
 
-local function isSapling(itemName)
-    return string.match(itemName, "_sapling$") ~= nil
-end
-
-local function isLog(itemName)
-    return string.match(itemName, "_log$") ~= nil
-end
-
-local function isLeaves(itemName)
-    return string.match(itemName, "_leaves$") ~= nil
-end
-
-local function shouldMineBlock(direction, allowLeaves)
-	allowLeaves = (allowLeaves == nil) or allowLeaves
-	local turtleInspect = turtle.inspect
-	if direction == "up" then
-		turtleInspect = turtle.inspectUp
-	elseif direction == "down" then
-		turtleInspect = turtle.inspectDown
-	end
-	local success, frontItem = turtleInspect()
-	if success and (isLog(frontItem.name) or (allowLeaves and isLeaves(frontItem.name))) then
-		return true
+local function matchesAny(name, patterns)
+	if not name then return false end
+	local lowered = name:lower()
+	for _, p in ipairs(patterns or {}) do
+		if lowered:find(p, 1, true) then return true end
 	end
 	return false
 end
 
-local function suckItems()
-	if not turtle.detect() then
-		while turtle.suck() do
-		end
-	end
-	if not turtle.detectUp() then
-		while turtle.suckUp() do
-		end
-	end
-	if not turtle.detectDown() then
-		while turtle.suckDown() do
-		end
+local function isWood(name) return matchesAny(name, CONFIG.woodPatterns) end
+local function isLeaves(name) return matchesAny(name, CONFIG.leafPatterns) end
+local function isSapling(name) return matchesAny(name, CONFIG.saplingPatterns) end
+
+--- Ce bloc fait-il partie de l'arbre, donc à casser ?
+local function isTree(name)
+	return isWood(name) or (CONFIG.chopLeaves and isLeaves(name))
+end
+
+local INSPECTS = { forward = "inspect", up = "inspectUp", down = "inspectDown" }
+
+--- Nom du bloc dans cette direction, ou nil.
+local function blockAt(where)
+	local seen, info = turtle[INSPECTS[where]]()
+	if seen and info then return info.name end
+	return nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Interface
+-- ---------------------------------------------------------------------------
+
+local function setupUi()
+	ccUi.reset({ logLines = 1 })
+	ccUi.useMonitor()
+	ccUi.addButton({ label = "CHARBON", y = 1, cmd = "charcoal", key = "c" })
+	ccUi.addButton({ label = "PAUSE", y = 2, cmd = "pause" })
+	ccUi.addButton({ label = "STOP", y = 3, cmd = "abort", key = "x" })
+	ccUi.clear()
+end
+
+local function draw()
+	local pos = ccNav.position()
+
+	ccUi.line(1, "Ferme a arbres")
+	ccUi.line(3, ("Arbres : %d%s")
+		:format(ctx.trees, ctx.target and (" / " .. ctx.target) or ""))
+	ccUi.line(4, ("Carburant : %s")
+		:format(ccFuel.isUnlimited() and "illimite" or ccFuel.level()))
+	ccUi.line(5, "Reserve : " .. ccFuel.reserve(pos, nil, CONFIG.fuelMargin))
+	ccUi.line(6, "Position : " .. ccVec.tostring(pos))
+	ccUi.line(7, "Slots libres : " .. ccInv.freeCount())
+	ccUi.line(8, "Charbon de bois : " .. (CONFIG.makeCharcoal and "oui" or "non"))
+	ccUi.line(9, "Etat : " .. ctx.state .. (ctx.reason and (" (" .. ctx.reason .. ")") or ""))
+	ccUi.drawButtons()
+end
+
+-- ---------------------------------------------------------------------------
+-- Commandes
+-- ---------------------------------------------------------------------------
+
+-- Les commandes sont COLLECTÉES ici et CONSOMMÉES entre deux transitions.
+-- L'ancienne version basculait makeCharcoal depuis la coroutine d'événements,
+-- en pleine opération de la boucle principale.
+local function collect()
+	local e = { waitEvent() }
+	if ctx.stopped then return end
+
+	local name = e[1]
+	if name == "char" or name == "mouse_click" or name == "monitor_touch" then
+		local cmd = ccUi.dispatch(table.unpack(e))
+		if cmd then ctx.pending[#ctx.pending + 1] = cmd end
+		draw()
+	elseif name == "timer" and e[2] == ctx.drawTimer then
+		ctx.drawTimer = os.startTimer(0.5)
+		draw()
 	end
 end
 
--- Movement
+local function applyCommands()
+	while #ctx.pending > 0 do
+		local cmd = table.remove(ctx.pending, 1)
 
-local function moveUp()
-	suckItems()
-	if turtle.up() then
-		curPosition.Z = curPosition.Z + 1
-		save()
-        return true
-	else
-		while shouldMineBlock("up") and turtle.digUp() do
-		end
-		if not turtle.detectUp() then
-			turtle.attackUp()
-		end
-        return false
-	end
-end
+		if cmd == "charcoal" then
+			CONFIG.makeCharcoal = not CONFIG.makeCharcoal
+			journal("Charbon de bois : " .. (CONFIG.makeCharcoal and "active" or "desactive"))
 
-local function moveDown()
-	suckItems()
-	if turtle.down() then
-		curPosition.Z = curPosition.Z - 1
-		save()
-        return true
-	else
-		while shouldMineBlock("down") and turtle.digDown() do
-		end
-		if not turtle.detectDown() then
-			turtle.attackDown()
-		end
-        return false
-	end
-end
-
--- Fonction pour avancer et gérer les obstacles
-local function moveForward(curPosition, axis)
-	suckItems()
-	if turtle.forward() then
-		curPosition[axis] = curPosition[axis] + ((curPosition.direction == 0 or curPosition.direction == 1) and 1 or -1)
-		save()
-        return true
-	else
-		while shouldMineBlock("front") and turtle.dig() do
-		end
-		if not turtle.detect() then
-			turtle.attack()
-		end
-        return false
-	end
-end
--- Fonction pour tourner à droite
-local function turnRight()
-	suckItems()
-	if turtle.turnRight() then
-		curPosition.direction = (curPosition.direction + 1) % 4
-		save()
-	end
-end
--- Fonction pour tourner à gauche
-local function turnLeft()
-	suckItems()
-	if turtle.turnLeft() then
-		curPosition.direction = (curPosition.direction + 3) % 4
-		save()
-	end
-end
--- Fonction pour faire demi-tour
-local function turnAround()
-	turnLeft()
-	turnLeft()
-end
-local function moveToTarget()
-	-- Si on doit monter on commence par monter
-	if curPosition.Z < targetPosition.Z then
-		return moveUp()
-	-- Vérifiez la direction actuelle de la turtle
-	elseif curPosition.X ~= targetPosition.X or curPosition.Y ~= targetPosition.Y then
-		if curPosition.direction == 0 then -- Nord
-			if curPosition.X < targetPosition.X then
-				return moveForward(curPosition, "X")
-			elseif curPosition.X > targetPosition.X then
-				turnAround()
-				return moveForward(curPosition, "X")
-			elseif curPosition.Y < targetPosition.Y then
-				turnRight()
-				return moveForward(curPosition, "Y")
-			elseif curPosition.Y > targetPosition.Y then
-				turnLeft()
-				return moveForward(curPosition, "Y")
+		elseif cmd == "pause" or cmd == "resume" then
+			if ctx.state == S.PAUSED then
+				ctx.state = ctx.resumeTo or S.TEND
+				journal("Reprise")
+			else
+				ctx.resumeTo = ctx.state
+				ctx.state = S.PAUSED
+				journal("En pause")
 			end
-		elseif curPosition.direction == 1 then -- Est
-			if curPosition.Y < targetPosition.Y then
-				return moveForward(curPosition, "Y")
-			elseif curPosition.Y > targetPosition.Y then
-				turnAround()
-				return moveForward(curPosition, "Y")
-			elseif curPosition.X > targetPosition.X then
-				turnRight()
-				return moveForward(curPosition, "X")
-			elseif curPosition.X < targetPosition.X then
-				turnLeft()
-				moveForward(curPosition, "X")
-			end
-		elseif curPosition.direction == 2 then -- Sud
-			if curPosition.X > targetPosition.X then
-				return moveForward(curPosition, "X")
-			elseif curPosition.X < targetPosition.X then
-				turnAround()
-				return moveForward(curPosition, "X")
-			elseif curPosition.Y > targetPosition.Y then
-				turnRight()
-				return moveForward(curPosition, "Y")
-			elseif curPosition.Y < targetPosition.Y then
-				turnLeft()
-				return moveForward(curPosition, "Y")
-			end
-		elseif curPosition.direction == 3 then -- Ouest
-			if curPosition.Y > targetPosition.Y then
-				return moveForward(curPosition, "Y")
-			elseif curPosition.Y < targetPosition.Y then
-				turnAround()
-				return moveForward(curPosition, "Y")
-			elseif curPosition.X < targetPosition.X then
-				turnRight()
-				return moveForward(curPosition, "X")
-			elseif curPosition.X > targetPosition.X then
-				turnLeft()
-				return moveForward(curPosition, "X")
-			end
+
+		elseif cmd == "abort" then
+			ctx.reason = "abort"
+			ctx.abort = true
+			ctx.state = S.RETURN
+			journal("Arret demande")
 		end
-	-- Si on doit descendre on fini par descendre
-	elseif curPosition.Z > targetPosition.Z then
-		return moveDown()
-	-- Enfin on aligne la direction
-	elseif targetPosition.direction ~= nil and curPosition.direction > targetPosition.direction then
-		turnLeft()
-	elseif targetPosition.direction ~= nil and curPosition.direction < targetPosition.direction then
-		turnRight()
+	end
+end
+
+-- ---------------------------------------------------------------------------
+-- Mouvement filtré
+-- ---------------------------------------------------------------------------
+-- Toutes les primitives de déplacement passent par ici avec `dig = false`, et
+-- ne cassent que ce que isTree() reconnaît. C'est la seule façon d'obtenir un
+-- creusement sélectif avec ccNav, dont l'option `dig` est un booléen.
+
+--- Dégage la case si elle appartient à l'arbre.
+-- @return true si la case est libre à la sortie
+local function clearTree(where)
+	for _ = 1, 8 do
+		local name = blockAt(where)
+		if not name then return true end
+		if not isTree(name) then return false end
+		-- maxDig = 1 : un seul coup, puis on ré-inspecte. ccNav.dig() sans
+		-- borne creuserait aussi ce qui retombe derrière, sans le regarder.
+		if not ccNav.dig(where, { maxDig = 1 }) then return false end
+		ctx.logs = ctx.logs + 1
+	end
+	return blockAt(where) == nil
+end
+
+local MOVES = { forward = ccNav.forward, up = ccNav.up, down = ccNav.down }
+
+--- Un pas, en ne cassant que l'arbre.
+-- @return true, ou false + raison
+local function stepTo(where)
+	clearTree(where)
+	return MOVES[where]({ dig = false })
+end
+
+--- Cap à prendre pour aller de `from` à la case adjacente `to`.
+local function headingTo(from, to)
+	if to.x > from.x then return 0 end
+	if to.y > from.y then return 1 end
+	if to.x < from.x then return 2 end
+	if to.y < from.y then return 3 end
+	return nil
+end
+
+--- Revient sur `prev`, adjacente par construction puisqu'on en vient.
+--
+-- On ne se sert PAS de ccNav.back() : la case d'où l'on vient est derrière
+-- nous seulement si le cap n'a pas bougé, et l'exploration des quatre côtés le
+-- fait justement tourner. Recalculer le cap depuis les deux positions est
+-- exact quoi qu'il se soit passé entre-temps.
+local function stepBackTo(prev)
+	local cur = ccNav.position()
+	local where
+	if prev.z > cur.z then where = "up"
+	elseif prev.z < cur.z then where = "down"
 	else
-		save()
+		local dir = headingTo(cur, prev)
+		if not dir then
+			if prev.dir then ccNav.turnTo(prev.dir) end
+			return true          -- déjà sur place
+		end
+		ccNav.turnTo(dir)
+		where = "forward"
+	end
+
+	local ok, reason = stepTo(where)
+	if prev.dir then ccNav.turnTo(prev.dir) end
+	if not ok then
+		-- La case d'où l'on vient s'est refermée : sable tombé, bloc posé par
+		-- un tiers. On ne peut plus dérouler la récursion, le trajet de
+		-- secours prendra le relais.
+		ctx.lost = true
+		journal("Retour d'un pas impossible : " .. tostring(reason))
+	end
+	return ok
+end
+
+-- ---------------------------------------------------------------------------
+-- Abattage
+-- ---------------------------------------------------------------------------
+
+--- Faut-il interrompre l'abattage en cours ?
+--
+-- Vérifié à CHAQUE nœud de la récursion. L'ancienne version ne testait ni la
+-- place ni le carburant pendant l'abattage, et les deux manques ont des
+-- conséquences distinctes :
+--
+--   * Inventaire plein. turtle.dig() réussit QUAND MÊME -- il renvoie true et
+--     l'objet est perdu en silence. L'arbre était donc coupé dans le vide,
+--     sans que rien ne le signale.
+--   * Panne sèche en pleine canopée. Le mouvement échouait, turtle.detect()
+--     était faux, et l'ancien code appelait turtle.attack() en boucle.
+--
+-- La garde de ccFuel n'est délibérément PAS installée sur ccNav ici : elle
+-- refuserait aussi les mouvements qui déroulent la récursion, c'est-à-dire
+-- ceux qui ramènent justement vers l'origine.
+local function chopStop()
+	if ctx.stopped or ctx.abort then return "abort" end
+	if ctx.lost then return "perdu" end
+	if ccInv.freeCount() <= CONFIG.spareSlots then return "inventaire" end
+	if ccFuel.level() <= ccFuel.reserve(ccNav.position(), nil, CONFIG.fuelMargin) then
+		return "carburant"
+	end
+	return nil
+end
+
+--- Abat l'arbre à partir de la case courante, qui vient d'être vidée.
+--
+-- Chaque descente revient sur sa case d'appel avant de rendre la main : la
+-- pile d'appels Lua EST le chemin de retour. En sortie, la turtle est donc
+-- revenue exactement là où elle est entrée, cap compris.
+local function chopHere(depth)
+	if depth > CONFIG.maxDepth then return end
+
+	--- Casse la case voisine, y entre, poursuit, puis revient ici.
+	--
+	-- La position de retour est relevée à CHAQUE descente, et non une fois pour
+	-- toutes à l'entrée de la fonction : l'exploration des quatre côtés fait
+	-- tourner la turtle, donc le cap à restaurer n'est pas le même d'un côté à
+	-- l'autre. Le relever une seule fois remettait le cap du premier côté et
+	-- faisait sauter les suivants.
+	-- @return false s'il faut interrompre l'abattage
+	local function into(where)
+		if chopStop() then return false end
+		local name = blockAt(where)
+		if not isTree(name) then return true end
+		if not clearTree(where) then return true end
+
+		local from = ccNav.position()
+		-- La case est vide : on n'y entre que pour suivre ce qu'il y a
+		-- au-delà. Si le mouvement échoue, rien n'est perdu, on passe au
+		-- voisin suivant.
+		if not MOVES[where]({ dig = false }) then return true end
+		chopHere(depth + 1)
+		return stepBackTo(from)
+	end
+
+	if not into("up") then return end
+	if not into("down") then return end
+
+	-- Les quatre côtés. Le cap revient de lui-même à son point de départ à la
+	-- fin de la boucle, mais stepBackTo ne s'y fie pas.
+	for _ = 1, 4 do
+		if not into("forward") then return end
+		if chopStop() then return end
+		ccNav.turnRight()
 	end
 end
 
--- Inventory
-
-local function findItemSlotInTurtleInventory(itemName)
-	for slot=1, 16 do
-		local itemDetail = turtle.getItemDetail(slot)
-		if itemDetail ~= nil and itemDetail.name == itemName then
-			return true, slot
+--- Ramasse ce qui traîne autour, sans vider un conteneur voisin.
+--
+-- Les saplings et bâtons lâchés par les feuilles tombent au sol : turtle.dig()
+-- ne les met en inventaire que s'ils viennent du bloc cassé. La garde sur
+-- detect() est ce qui évite d'aspirer le contenu du coffre.
+local function gatherDrops()
+	local entry = turtle.getSelectedSlot()
+	for _, where in ipairs({ "forward", "up", "down" }) do
+		if blockAt(where) == nil then
+			local fn = ({ forward = turtle.suck, up = turtle.suckUp, down = turtle.suckDown })[where]
+			for _ = 1, 8 do
+				if not fn() then break end
+			end
 		end
 	end
-	return false, nil
+	if turtle.getSelectedSlot() ~= entry then turtle.select(entry) end
 end
 
-local function findItemSlotInInventory(inventory, itemName, stackMustHaveFreeSpace)
-	-- TODO : use a callback to validate itemName
-	-- if is string use a default callback (anonymous function)
-	-- if is function use it as callback (and validator(itemDetail.name))
-	local size = inventory.size()
-	for slot=1, size do
-		local itemDetail = inventory.getItemDetail(slot)
-		if itemDetail ~= nil and itemDetail.name == itemName and (not stackMustHaveFreeSpace or itemDetail.count < itemDetail.maxCount) then
-			return slot, itemDetail
+-- ---------------------------------------------------------------------------
+-- Conteneur et four
+-- ---------------------------------------------------------------------------
+
+--- Côté portant un périphérique dont le type correspond à l'un des motifs.
+-- @return côté (nom de l'API peripheral), type
+local function sideMatching(patterns)
+	if type(peripheral) ~= "table" then return nil end
+	local ok, names = pcall(peripheral.getNames)
+	if not ok or type(names) ~= "table" then return nil end
+
+	for _, side in ipairs(names) do
+		local fine, kind = pcall(peripheral.getType, side)
+		if fine and type(kind) == "string" and matchesAny(kind, patterns) then
+			return side, kind
 		end
 	end
 	return nil
 end
 
-local function findEmptySlot(itemList, size)
-	for slot=1, size do
-		if not itemList[slot] then
-			return true, slot
-		end
+--- Cherche un conteneur autour de l'origine, et s'oriente vers lui.
+--
+-- Les quatre côtés, le dessus et le dessous sont examinés : n'importe quelle
+-- position convient. L'ancienne version imposait un côté sans le dire, et son
+-- test `chestSide == "down"` ne matchait jamais -- l'API peripheral nomme ce
+-- côté « bottom ». Avec un coffre en dessous, la turtle vidait donc DEVANT
+-- elle, au sol.
+-- @return "forward", "up", "down", ou nil
+local function findDepot()
+	local seen = {}
+
+	local function describe(name, slots)
+		return name .. (slots and (" (" .. slots .. " slots)") or " (nom seul)")
 	end
-	return false, nil
+
+	for _ = 1, 4 do
+		local found, name, slots = ccInv.depotAt("forward")
+		if found then return "forward" end
+		if name then seen[#seen + 1] = describe(name, slots) end
+		ccNav.turnRight()
+	end
+
+	for _, where in ipairs({ "up", "down" }) do
+		local found, name, slots = ccInv.depotAt(where)
+		if found then return where end
+		if name then seen[#seen + 1] = describe(name, slots) end
+	end
+
+	if #seen > 0 then
+		journal("Aucun depot reconnu parmi : " .. table.concat(seen, ", "))
+		journal("Voir depotMinSlots et depotPatterns dans " .. CONFIG_PATH)
+	end
+	return nil
 end
 
-local function clearFurnaceOutput()
-	if findPeripherals() then
-		local furnace = peripheral.wrap(furnaceSide)
-		local chest = peripheral.wrap(chestSide)
-		local outputSlotItemDetail = furnace.getItemDetail(3)
-		if outputSlotItemDetail ~= nil and outputSlotItemDetail.count > 0 then
-			local itemName = outputSlotItemDetail.name
-			local chestSlot, chestItemDetail = findItemSlotInInventory(chest, itemName, true)
-			while (chestSlot ~= nil and chestItemDetail ~= nil) and outputSlotItemDetail ~= nil and outputSlotItemDetail.count > 0 do
-				furnace.pushItems(chestSide, 3, chestItemDetail.maxCount - chestItemDetail.count, chestSlot)
-				outputSlotItemDetail = furnace.getItemDetail(3)
-				chestSlot, chestItemDetail = findItemSlotInInventory(chest, itemName, true)
-			end
-			if chestSlot == nil and outputSlotItemDetail ~= nil and outputSlotItemDetail.count > 0 then
-				local success, chestSlot = findEmptySlot(chest.list(), chest.size())
-				if success then
-					furnace.pushItems(chestSide, 3, 64, chestSlot)
-				end
-			end
-			outputSlotItemDetail = furnace.getItemDetail(3)
+-- Nom de périphérique correspondant à une direction du turtle.
+local SIDES = { forward = "front", up = "top", down = "bottom" }
+
+--- Fait tourner le four : sortir le charbon, remplir l'entrée et le foyer.
+--
+-- C'est le CONTENEUR qui alimente le four -- pushItems avec un slot de
+-- destination explicite. Une turtle ne peut pas viser un slot précis d'un
+-- voisin : turtle.drop() laisse le conteneur choisir, et pour une bûche, qui
+-- est à la fois fondable et combustible, ce choix est indéterminé.
+--
+-- C'est le bug qu'avait l'ancienne version : `chest.pushItems(furnaceSide,
+-- chestSlot)` sans quatrième argument envoyait le combustible dans le slot
+-- d'ENTRÉE. La boucle surveillait le foyer, qui restait donc vide, et ne
+-- s'arrêtait qu'une fois le conteneur vidé de ses bûches -- ou jamais, si
+-- pushItems ne déplaçait plus rien.
+--
+-- Slots d'un four : 1 entrée, 2 foyer, 3 sortie.
+local function runFurnace(depotWhere)
+	local furnaceSide = sideMatching({ "furnace", "smelter", "kiln" })
+	if not furnaceSide then return false, "aucun four" end
+
+	local chestSide = SIDES[depotWhere]
+	if not chestSide then return false, "depot inaccessible" end
+
+	local okChest, chest = pcall(peripheral.wrap, chestSide)
+	local okFurnace, furnace = pcall(peripheral.wrap, furnaceSide)
+	if not okChest or not chest or not okFurnace or not furnace then
+		return false, "peripherique illisible"
+	end
+
+	--- Premier slot du conteneur dont le contenu satisfait `accept`.
+	local function findInChest(accept)
+		local ok, list = pcall(chest.list)
+		if not ok or type(list) ~= "table" then return nil end
+		for slot, item in pairs(list) do
+			if item and item.name and accept(item.name) then return slot end
 		end
-		return outputSlotItemDetail == nil or outputSlotItemDetail.count > 0
+		return nil
+	end
+
+	-- 1. Sortie vers le conteneur. Chaque transfert doit déplacer quelque
+	--    chose, sinon on s'arrête : c'est ce qui borne la boucle.
+	for _ = 1, 8 do
+		local ok, moved = pcall(furnace.pushItems, chestSide, 3)
+		if not ok or not moved or moved == 0 then break end
+	end
+
+	-- 2. Entrée : des bûches, et seulement des bûches.
+	for _ = 1, 8 do
+		local slot = findInChest(isWood)
+		if not slot then break end
+		local ok, moved = pcall(chest.pushItems, furnaceSide, slot, 64, 1)
+		if not ok or not moved or moved == 0 then break end
+	end
+
+	-- 3. Foyer : du charbon si le conteneur en a, sinon des bûches.
+	local function isBurnable(name)
+		return name == "minecraft:charcoal" or name == "minecraft:coal"
+			or name == "minecraft:coal_block" or isWood(name)
+	end
+	for _ = 1, 4 do
+		local slot = findInChest(isBurnable)
+		if not slot then break end
+		local ok, moved = pcall(chest.pushItems, furnaceSide, slot, 8, 2)
+		if not ok or not moved or moved == 0 then break end
+	end
+
+	return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Inventaire
+-- ---------------------------------------------------------------------------
+
+--- Slots à ne pas vider : de quoi garder du combustible, des saplings et de
+--- l'engrais.
+--
+-- On n'utilise PAS ccFuel.protectSlots ici, et c'est le piège propre à ce
+-- script : dans une ferme à bois, le butin EST du combustible. La bûche brûle,
+-- donc turtle.refuel(0) répond oui, donc protectSlots la garde -- et la récolte
+-- ne serait jamais déposée. Le bois est explicitement exclu : s'il faut du
+-- carburant, refuelFromInventory le brûlera, ce qui est un choix délibéré et
+-- pas un effet de bord du vidage.
+local function protectedSlots()
+	local set, fuel, saplings = {}, 0, 0
+
+	for _, slot in ipairs(ccFuel.fuelSlots()) do
+		if fuel >= CONFIG.keepFuel then break end
+		local d = ccInv.detail(slot)
+		if d and not isWood(d.name) then
+			set[slot] = true
+			fuel = fuel + d.count
+		end
+	end
+
+	for slot = 1, 16 do
+		if saplings >= CONFIG.keepSaplings then break end
+		local d = ccInv.detail(slot)
+		if d and isSapling(d.name) then
+			set[slot] = true
+			saplings = saplings + d.count
+		end
+	end
+
+	-- L'engrais n'est ni du butin ni du combustible : il sert ici.
+	local bone = ccInv.find("minecraft:bone_meal")
+	if bone then set[bone] = true end
+
+	ccInv.selectForMining()
+	return set
+end
+
+--- Slot de combustible à ranger à l'emplacement canonique. Même raison qu'au
+--- dessus : ccFuel.bestFuelSlot() élirait une pile de bûches.
+local function fuelSlotForTidy()
+	local best, count = nil, 0
+	for _, slot in ipairs(ccFuel.fuelSlots()) do
+		local d = ccInv.detail(slot)
+		if d and not isWood(d.name) and d.count > count then
+			best, count = slot, d.count
+		end
+	end
+	ccInv.selectForMining()
+	return best
+end
+
+--- Slot contenant un sapling, ou nil.
+local function findSapling()
+	for slot = 1, 16 do
+		local d = ccInv.detail(slot)
+		if d and isSapling(d.name) then return slot end
+	end
+	return nil
+end
+
+--- Prend des saplings dans le conteneur, quand il n'en reste plus à bord.
+--
+-- L'ancienne version avait la place de ce code, un commentaire décrivant ce
+-- qu'il devait faire, et à l'endroit de l'appel une COPIE de la recherche en
+-- inventaire, dont le résultat était jeté. Faute de sapling, le script
+-- s'arrêtait au lieu d'aller en chercher.
+local function fetchSaplings(where)
+	local before = ccInv.freeCount()
+	if before == 0 then return false end
+
+	for _ = 1, 4 do
+		local slot = ccInv.firstFree()
+		if not slot then break end
+		if not ccInv.suckFrom(where, slot) then break end
+
+		local d = ccInv.detail(slot)
+		if d and isSapling(d.name) then return true end
+		-- Ce n'est pas un sapling : on le rend et on s'arrête là. Insister
+		-- viderait le conteneur pile par pile dans la turtle.
+		ccInv.dropTo(where, slot)
+		break
 	end
 	return false
 end
 
-local function fillFurnaceInput()
-	if findPeripherals() then
-		local furnace = peripheral.wrap(furnaceSide)
-		local chest = peripheral.wrap(chestSide)
+-- ---------------------------------------------------------------------------
+-- États
+-- ---------------------------------------------------------------------------
 
-		local furnaceItemInput = furnace.getItemDetail(1)
-		local chestSlot, chestItemDetail = findItemSlotInInventory(chest, "minecraft:oak_log", false)
-		while chestSlot ~= nil and chestItemDetail ~= nil and (furnaceItemInput== nil or furnaceItemInput.count < furnaceItemInput.maxCount) do
-			furnaceItemInput = furnace.getItemDetail(1)
-			chestSlot, chestItemDetail = findItemSlotInInventory(chest, "minecraft:oak_log", false)
-			if chestSlot ~= nil and chestItemDetail ~= nil then
-				chest.pushItems(furnaceSide, chestSlot)
-			end
-		end
+local STATES = {}
 
-		local furnaceFuelInput = furnace.getItemDetail(2)
-		local fuelItem = "minecraft:oak_log"
-		if furnaceFuelInput ~= nil and furnaceFuelInput.name ~= nil then
-			fuelItem = furnaceFuelInput.name
-		end
-		chestSlot, chestItemDetail = findItemSlotInInventory(chest, fuelItem, false)
-		while chestSlot ~= nil and chestItemDetail ~= nil and (furnaceFuelInput == nil or furnaceFuelInput.count < furnaceFuelInput.maxCount) do
-			furnaceFuelInput = furnace.getItemDetail(2)
-			chestSlot, chestItemDetail = findItemSlotInInventory(chest, fuelItem, false)
-			if chestSlot ~= nil and chestItemDetail ~= nil then
-				chest.pushItems(furnaceSide, chestSlot)
-			end
-		end
-		return true
+STATES[S.CALIBRATE] = function()
+	-- Le suivi de position est à l'estime : rien à recaler, mais on vérifie que
+	-- la turtle est bien chez elle avant de repartir.
+	local pos = ccNav.position()
+	if pos.x ~= 0 or pos.y ~= 0 or pos.z ~= 0 then
+		journal("Reprise loin de l'origine : " .. ccVec.tostring(pos))
+		return S.RETURN
 	end
-	return false
+	ccNav.turnTo(0)
+	return S.TEND
 end
 
--- turtle must be facing, below or over the chest
-local function takeItemInChest(itemName, count)
-	local turtleSuck = turtle.suck
-	local oldChestSide = chestSide
-	if chestSide == "right" then
-		turnRight()
-		chestSide = "front"
-	elseif chestSide == "left" then
-		turnLeft()
-		chestSide = "front"
-	elseif chestSide == "back" then
-		turnAround()
-		chestSide = "front"
-	elseif chestSide == "top" then
-		turtleSuck = turtle.suckUp
-	elseif chestSide == "down" then
-		turtleSuck = turtle.suckDown
+--- Inspecte la case de plantation, et agit selon ce qui s'y trouve.
+--
+-- Cet état ne s'exécute QU'À l'origine, ce qui en fait le bon endroit pour
+-- décider de l'arrêt : la turtle y est déjà rentrée et vidée. C'est aussi
+-- pourquoi le compte d'arbres est vérifié APRÈS la plantation, et non avant --
+-- sinon `ccChopper 1` laissait la ferme en friche derrière lui.
+STATES[S.TEND] = function()
+	ccNav.turnTo(0)
+
+	local name = blockAt("forward")
+
+	if name == nil then
+		-- Case libre : on plante avant toute autre décision.
+		local slot = findSapling()
+		if not slot then
+			ctx.reason = "saplings"
+			return S.RETURN
+		end
+		turtle.select(slot)
+		local placed = turtle.place()
+		ccInv.selectForMining()
+		if not placed then
+			journal("Plantation impossible : sol inadapte ?")
+			ctx.afterWait = S.TEND
+			return S.AWAIT
+		end
+		name = blockAt("forward")
 	end
 
-	local returnValue = false
-	local chest = peripheral.wrap(chestSide)
-	local chestItemSlot, chestItemDetail = findItemSlotInInventory(chest, itemName, false)
-	if chestItemSlot ~= nil and chestItemDetail ~= nil then
-		if chestItemSlot == 1 then
-			turtleSuck(count)
-			returnValue = true
-		else
-			-- find empty slot
-			local success, chestEmptySlot = findEmptySlot(chest.list(), chest.size())
-			if success then
-				if chestEmptySlot == 1 then
-					-- move fuitemel to slot 1
-					chest.pushItems(chestSide, chestItemSlot, chestItemDetail.count, 1)
-					turtleSuck(count)
-					returnValue = true
-				else
-					-- move slot 1 to empty slot
-					chest.pushItems(chestSide, 1, 64, chestEmptySlot)
-					-- move item to slot 1
-					chest.pushItems(chestSide, chestItemSlot, chestItemDetail.count, 1)
-					turtleSuck(count)
-					returnValue = true
-				end
-			end
-		end
+	if ctx.target and ctx.trees >= ctx.target then
+		journal(("Compte atteint : %d arbre(s)"):format(ctx.trees))
+		return S.DONE
 	end
 
-	if oldChestSide == "right" then
-		turnLeft()
-	elseif oldChestSide == "left" then
-		turnRight()
-	elseif oldChestSide == "back" then
-		turnAround()
+	if isWood(name) then
+		return S.CHOP
 	end
-	chestSide = oldChestSide
 
-	return returnValue
-end
-
-local function clearTurtleInventory()
-	local needEmptying = false
-	local fuelItem = nil
-	for slot=1, 16 do
-		local itemDetail = turtle.getItemDetail(slot)
-		if itemDetail ~= nil and not (indexOf(fuelPriority, itemDetail.name) or isSapling(itemDetail.name) or itemDetail.name == "minecraft:bone_meal") then
-			needEmptying = true
-			break
-		elseif itemDetail ~= nil and fuelItem == nil and indexOf(fuelPriority, itemDetail.name) then
-			fuelItem = fuelPriority[indexOf(fuelPriority, itemDetail.name)]
-		elseif itemDetail ~= nil and fuelItem ~= nil and indexOf(fuelPriority, itemDetail.name) and fuelItem ~= fuelPriority[indexOf(fuelPriority, itemDetail.name)] then
-			needEmptying = true
-			break
-		end
-	end
-	if not needEmptying then
-		return true
-	end
-	if findPeripherals() then
-		local turtleDrop = turtle.drop
-		local oldChestSide = chestSide
-		if chestSide == "right" then
-			turnRight()
-			chestSide = "front"
-		elseif chestSide == "left" then
-			turnLeft()
-			chestSide = "front"
-		elseif chestSide == "back" then
-			turnAround()
-			chestSide = "front"
-		elseif chestSide == "top" then
-			turtleDrop = turtle.dropUp
-		elseif chestSide == "down" then
-			turtleDrop = turtle.dropDown
-		end
-		local chest = peripheral.wrap(chestSide)
-		local fuelSlot = {slot = 0, count = 0, maxCount = 64, name = nil}
-		local saplingSlot = {slot = 0, count = 0, maxCount = 64, name = nil}
-		local fertilizerSlot = {slot = 0, count = 0, maxCount = 64, name = nil}
-		for slot=1, 16 do
-			if not findEmptySlot(chest.list(), chest.size()) then
-				if oldChestSide == "right" then
-					turnLeft()
-				elseif oldChestSide == "left" then
-					turnRight()
-				elseif oldChestSide == "back" then
-					turnAround()
-				end
-				return false
-			end
-			local itemDetail = turtle.getItemDetail(slot, true)
-			if itemDetail ~= nil then
-				-- c'est un log
-				if isLog(itemDetail.name) then
-					turtle.select(slot)
-					turtleDrop()
-				-- c'est un fuel et je n'en ai pas
-				elseif fuelSlot.name == nil and indexOf(fuelPriority, itemDetail.name) then
-					for fuelIndex = 1, #fuelPriority do
-						if itemDetail.name == fuelPriority[fuelIndex] then
-							fuelSlot.name = itemDetail.name
-							fuelSlot.count = itemDetail.count
-							fuelSlot.slot = slot
-						end
-					end
-				-- c'est mon fuel et j'ai de la place
-				elseif itemDetail.name == fuelSlot.name and fuelSlot.count < fuelSlot.maxCount then
-					turtle.select(slot)
-					turtle.transferTo(fuelSlot.slot, fuelSlot.maxCount - fuelSlot.count)
-					local fuelDetail = turtle.getItemDetail(fuelSlot.slot, true)
-					if fuelDetail ~= nil then
-						fuelSlot.count = fuelDetail.count
-					end
-					-- c'est mon fuel et j'avais de la place mais je n'en ai plus
-					if itemDetail.count > (fuelSlot.maxCount - fuelSlot.count) then
-						turtleDrop()
-					end
-				-- c'est un sapling et je n'en ai pas
-				elseif saplingSlot.name == nil and isSapling(itemDetail.name) then
-					saplingSlot.name = itemDetail.name
-					saplingSlot.count = itemDetail.count
-					saplingSlot.slot = slot
-				-- c'est mon sapling et j'ai de la place
-				elseif itemDetail.name == saplingSlot.name and saplingSlot.count < saplingSlot.maxCount then
-					turtle.select(slot)
-					turtle.transferTo(saplingSlot.slot, saplingSlot.maxCount - saplingSlot.count)
-					local saplingDetail = turtle.getItemDetail(saplingSlot.slot, true)
-					if saplingDetail ~= nil then
-						saplingSlot.count = saplingDetail.count
-					end
-					-- c'est mon sapling et j'avais de la place mais je n'en ai plus
-					if itemDetail.count > (saplingSlot.maxCount - saplingSlot.count) then
-						turtleDrop()
-					end
-				-- c'est un fertilizer et je n'en ai pas
-				elseif fertilizerSlot.name == nil and itemDetail.name == "minecraft:bone_meal" then
-					fertilizerSlot.name = itemDetail.name
-					fertilizerSlot.count = itemDetail.count
-					fertilizerSlot.slot = slot
-				-- c'est mon sapling et j'ai de la place
-				elseif itemDetail.name == fertilizerSlot.name and fertilizerSlot.count < fertilizerSlot.maxCount then
-					turtle.select(slot)
-					turtle.transferTo(fertilizerSlot.slot, fertilizerSlot.maxCount - fertilizerSlot.count)
-					local fertilizerDetail = turtle.getItemDetail(fertilizerSlot.slot, true)
-					if fertilizerDetail ~= nil then
-						fertilizerSlot.count = fertilizerDetail.count
-					end
-					-- c'est mon sapling et j'avais de la place mais je n'en ai plus
-					if itemDetail.count > (fertilizerSlot.maxCount - fertilizerSlot.count) then
-						turtleDrop()
-					end
-				else
-					turtle.select(slot)
-					turtleDrop()
-				end
-				turtle.select(1)
-			end
-		end
-		if saplingSlot.name == nil or saplingSlot.count < saplingSlot.maxCount then
-			-- search sapling in chest ?
-			takeItemInChest("minecraft:oak_sapling", saplingSlot.maxCount - saplingSlot.count)
-		end
-		if fuelSlot.name == nil or fuelSlot.count < fuelSlot.maxCount then
-			-- search fuel in chest ?
-			if fuelSlot.name ~= nil then
-				takeItemInChest(fuelSlot.name, fuelSlot.maxCount - fuelSlot.count)
-			else
-				for fuelIndex = 1, #fuelPriority do
-					if takeItemInChest(fuelPriority[fuelIndex], fuelSlot.maxCount - fuelSlot.count) then
-						break
-					end
-				end
-			end
-		end
-		turtle.select(1)
-		if oldChestSide == "right" then
-			turnLeft()
-		elseif oldChestSide == "left" then
-			turnRight()
-		elseif oldChestSide == "back" then
-			turnAround()
-		end
-		chestSide = oldChestSide
-		return true
-	end
-	return false
-end
-
-local function useFertilizer()
-	local success, fertilizerSlot = findItemSlotInTurtleInventory("minecraft:bone_meal")
-	if success then
-		turtle.select(fertilizerSlot)
-		turtle.place()
-		turtle.select(1)
-	end
-end
-
-local function refuel()
-	local minimumFuelAMount = (math.abs(curPosition.X) + math.abs(curPosition.Y) + math.abs(curPosition.Z)) + 200
-	if turtle.getFuelLevel() > minimumFuelAMount then
-		return true
-	end
-	local success, fuelSlot
-	for fuelIndex = 1, #fuelPriority do
-		success, fuelSlot = findItemSlotInTurtleInventory(fuelPriority[fuelIndex])
-		if success then
-			turtle.select(fuelSlot)
-			local itemDetail = turtle.getItemDetail(fuelSlot)
-			turtle.refuel(itemDetail.count)
-			turtle.select(1)
-			if turtle.getFuelLevel() > minimumFuelAMount then
-				return true
-			end
-		end
-		success = takeItemInChest(fuelPriority[fuelIndex])
-		if success then
-			success, fuelSlot = findItemSlotInTurtleInventory(fuelPriority[fuelIndex])
-			if success then
-				turtle.select(fuelSlot)
-				local itemDetail = turtle.getItemDetail(fuelSlot)
-				turtle.refuel(itemDetail.count)
-				turtle.select(1)
-				if turtle.getFuelLevel() > minimumFuelAMount then
-					return true
-				end
-			end
-		end
-	end
-	return turtle.getFuelLevel() > minimumFuelAMount
-end
-
-local function recursiveChopping()
-	local mineLeaves = true
-	for i = 1, 1 do
-		if shouldMineBlock("down", mineLeaves) then
-			while shouldMineBlock("down", mineLeaves) and turtle.digDown() do
-			end
-			if moveDown() then
-				recursiveChopping()
-				moveUp()
+	if isSapling(name) then
+		if CONFIG.fertilize then
+			local bone = ccInv.find("minecraft:bone_meal")
+			if bone then
+				turtle.select(bone)
+				turtle.place()
+				ccInv.selectForMining()
 			end
 		end
 
-		if shouldMineBlock("up", mineLeaves) then
-			while shouldMineBlock("up", mineLeaves) and turtle.digUp() do
-			end
-			if moveUp() then
-				recursiveChopping()
-				moveDown()
-			end
-		end
-
-		local sidesSeen = {0, 0, 0, 0}
-		for turn = curPosition.direction, curPosition.direction + 3 do
-			local oldPosition = copyPosition(curPosition)
-			local newPosition = copyPosition(curPosition)
-
-			if shouldMineBlock("front", mineLeaves) then
-				while shouldMineBlock("front", mineLeaves) and turtle.dig() do
-				end
-				if newPosition.direction == 0 or newPosition.direction == 2 then -- Nord ou Sud
-					newPosition.X = newPosition.X + (newPosition.direction == 0 and 1 or -1)
-				elseif newPosition.direction == 1 or curPosition.direction == 3 then -- Est ou Ouest
-					newPosition.Y = newPosition.Y + (newPosition.direction == 1 and 1 or -1)
-				end
-
-				targetPosition = copyPosition(newPosition)
-				while not arePositionEquals(curPosition, targetPosition, true) do
-					moveToTarget()
-				end
-
-				recursiveChopping()
-			end
-
-			newPosition = copyPosition(oldPosition)
-			sidesSeen[oldPosition.direction] = 1
-			if sidesSeen[(oldPosition.direction + 1) % 4] ~= 1 then
-				newPosition.direction = (oldPosition.direction + 1) % 4
-			elseif sidesSeen[(oldPosition.direction - 1) % 4] ~= 1 then
-				newPosition.direction = (oldPosition.direction - 1) % 4
-			elseif sidesSeen[(oldPosition.direction + 2) % 4] ~= 1 then
-				newPosition.direction = (oldPosition.direction + 2) % 4
-			elseif sidesSeen[(oldPosition.direction - 2) % 4] ~= 1 then
-				newPosition.direction = (oldPosition.direction - 2) % 4
-			elseif sidesSeen[(oldPosition.direction + 3) % 4] ~= 1 then
-				newPosition.direction = (oldPosition.direction + 3) % 4
-			elseif sidesSeen[(oldPosition.direction - 3) % 4] ~= 1 then
-				newPosition.direction = (oldPosition.direction - 3) % 4
-			else
-				break
-			end
-			targetPosition = copyPosition(newPosition)
-			while not arePositionEquals(curPosition, targetPosition, true) do
-				moveToTarget()
-			end
-		end
-		mineLeaves = true
-	end
-end
-
--- Main Loop
-
-local function mainLoop()
-	while true do
-		sleep(0)
-		local lastState = currentState
-		if currentState == "setup" then
-			-- est-on à l'origine ?
-			-- les peripheriques sont-ils présents ?
-			if not findPeripherals() then
-				pmsg("Please place a chest and a furnace next to the turtle.")
-				return false;
-			end
-			-- inspecte devant, cherche un sapling
-        	local success, frontItem = turtle.inspect()
-			if not success or not (isSapling(frontItem.name) or isLog(frontItem.name)) then
-				-- si pas de sapling on en cherche dans l'inventaire
-				local success, saplingSlot = findItemSlotInTurtleInventory("minecraft:oak_sapling")
-				if not success then
-					local success, saplingSlot = findItemSlotInTurtleInventory("minecraft:oak_sapling")
-					-- sinon on n'en cherche dans le coffre
-				end
-				if success then
-					-- enfin on le plante
-					turtle.select(saplingSlot)
-					turtle.place()
-					turtle.select(1)
-					currentState = "wait"
-				else
-					pmsg("Can't find sappling.")
-					return false;
-					-- ou si toujours pas trouvé afficher message
-				end
-			end
-			currentState = "wait"
-		elseif currentState == "wait" then
-			if makeCharcoal and not clearFurnaceOutput() then
-				pmsg("Chest is full")
-			elseif makeCharcoal and not fillFurnaceInput() then
-				pmsg("Please place a chest and a furnace next to the turtle.")
-			elseif not clearTurtleInventory() then
-				pmsg("Chest is full")
-			elseif makeCharcoal and not fillFurnaceInput() then
-				pmsg("Please place a chest and a furnace next to the turtle.")
-			elseif not refuel()  then
-				pmsg("Can't refuel")
-				-- we do nothing, not enought fuel
-			elseif #lastPositionStack > 1 then
-				targetPosition = lastPositionStack[#lastPositionStack]
-				moveToTarget()
-				pmsg("Move to target " .. #lastPositionStack)
-			else
-				pmsg("Inspect")
-				local success, frontItem = turtle.inspect()
-				if success and isLog(frontItem.name) then
-					recursiveChopping()
-					currentState = "going_back"
-				elseif success and isSapling(frontItem.name) then
-					useFertilizer()
-				end
-            end
-		elseif currentState == "going_back" then
-			if #lastPositionStack >= 1 then
-				local lastPositionInStack = lastPositionStack[#lastPositionStack]
-				if curPosition.X == lastPositionInStack.X and curPosition.Y == lastPositionInStack.Y and curPosition.Z == lastPositionInStack.Z then
-					lastPositionStack[#lastPositionStack] = nil
-				end
-				if #lastPositionStack >= 1 then
-					targetPosition = lastPositionStack[#lastPositionStack]
-					moveToTarget()
-				end
-			elseif curPosition.X ~= 0 or curPosition.Y ~= 0 or curPosition.Z ~= 0 or curPosition.direction ~= 0 then
-				targetPosition = origin
-				moveToTarget()
-			else
-				currentState = "setup"
-			end
-		end
-		if lastState ~= currentState then
-			pmsg(currentState)
-		end
-	end
-end
-
--- Event Loop
-
-local function toggleMakeCharcoal()
-	makeCharcoal = not makeCharcoal
-	if makeCharcoal then
-		pmsg("Charcoal production enabled.")
-	else
-		pmsg("Charcoal production disabled.")
-	end
-end
-
-local function eventLoop()
-	while true do
-		sleep(0)
+		-- Attente sur MINUTEUR, pas en boucle serrée. L'ancienne version
+		-- tournait à vide 20 fois par seconde -- sleep(0) -- et reposait de la
+		-- poudre d'os à chaque tour : une pile partait en quelques secondes.
+		--
+		-- L'attente est aussi le seul moment où ce script est disponible pour
+		-- l'utilisateur : les événements sont donc traduits en commandes ici,
+		-- et consommés par applyCommands au tour suivant.
+		local timer = os.startTimer(CONFIG.growWait)
 		while true do
-			local event, side, xPos, yPos = os.pullEvent()
-			if event == "char" then
-				if side == "C" or side == "c" then
-					toggleMakeCharcoal()
-				end
-			end
-			if event == "mouse_click" then
-				if (xPos >= sizeX-5 and xPos <= sizeX) and (yPos == 1) then
-					toggleMakeCharcoal()
+			local e = { waitEvent() }
+			if ctx.stopped then return S.TEND end
+			if e[1] == "timer" and e[2] == timer then break end
+			if e[1] == "char" or e[1] == "mouse_click" or e[1] == "monitor_touch" then
+				local cmd = ccUi.dispatch(table.unpack(e))
+				if cmd then
+					ctx.pending[#ctx.pending + 1] = cmd
+					break
 				end
 			end
 		end
+		return S.TEND
+	end
+
+	-- Autre chose devant : ni bois, ni pousse, ni air.
+	journal("Bloc inattendu devant l'origine : " .. tostring(name))
+	ctx.afterWait = S.TEND
+	return S.AWAIT
+end
+
+STATES[S.CHOP] = function()
+	ctx.lost = false
+	ctx.logs = 0
+	ccInv.selectForMining()
+
+	-- Vérifié AVANT le premier coup, et pas seulement dans la récursion : le
+	-- tronc est cassé par cet état lui-même, et turtle.dig() réussit même quand
+	-- l'inventaire est plein -- l'objet est alors perdu en silence.
+	local blocked = chopStop()
+	if blocked then
+		ctx.reason = blocked
+		journal("Abattage differe : " .. blocked)
+		return S.RETURN
+	end
+
+	local base = ccNav.position()
+
+	if not clearTree("forward") then
+		journal("Tronc inaccessible")
+		return S.RETURN
+	end
+	if not ccNav.forward({ dig = false }) then
+		journal("Entree dans le tronc impossible")
+		return S.RETURN
+	end
+
+	chopHere(1)
+	stepBackTo(base)
+
+	local stop = chopStop()
+	ctx.trees = ctx.trees + 1
+	journal(("Arbre abattu : %d blocs%s")
+		:format(ctx.logs, stop and (", interrompu (" .. stop .. ")") or ""))
+
+	ctx.reason = stop or "arbre"
+	return S.RETURN
+end
+
+STATES[S.RETURN] = function()
+	-- Rappel : aucune garde de carburant n'est installée sur ccNav (voir
+	-- chopStop). Elle raisonne sur la position courante, donc au moment précis
+	-- où la réserve est atteinte, elle interdirait AUSSI les mouvements qui
+	-- rapprochent de l'origine -- c'est-à-dire ceux de cet état.
+	if ccVec.equals(ccNav.position(), ORIGIN) then
+		ccNav.turnTo(0)
+		return S.SERVICE
+	end
+
+	-- Trajet direct, en ne cassant que l'arbre. Suffit dans le cas courant :
+	-- on est dans le fût que l'on vient de vider.
+	local ok = ccNav.goTo(ORIGIN, { dig = false })
+	if ok then return S.SERVICE end
+
+	-- Trajet de secours : par-dessus la canopée. C'est la seule route fiable
+	-- après un redémarrage, quand le chemin d'aller est perdu.
+	--
+	-- On monte d'un cran à la fois, en retentant le trajet horizontal après
+	-- chaque pas plutôt qu'en visant d'emblée le plafond : sortir du feuillage
+	-- suffit presque toujours, et grimper 40 blocs coûterait 80 mouvements pour
+	-- rien.
+	journal("Retour direct impossible, passage par au-dessus")
+	while ccNav.position().z < CONFIG.maxHeight do
+		if not stepTo("up") then break end
+		if ccNav.goTo({ x = 0, y = 0, z = ccNav.position().z }, { dig = false }) then
+			break
+		end
+	end
+
+	if ccNav.position().x ~= 0 or ccNav.position().y ~= 0 then
+		journal("Trajet de secours bloque")
+		return S.FAILED
+	end
+
+	while ccNav.position().z > 0 do
+		if not stepTo("down") then
+			journal("Descente sur l'origine bloquee")
+			return S.FAILED
+		end
+	end
+
+	ccNav.turnTo(0)
+	return S.SERVICE
+end
+
+STATES[S.SERVICE] = function()
+	gatherDrops()
+	ccInv.tidy(fuelSlotForTidy())
+
+	local where = findDepot()
+
+	if where then
+		local protect = protectedSlots()
+		local ok, why, slot = ccInv.unload(where, {
+			trashWhere = (where == "up") and "down" or "up",
+			protect = protect,
+		})
+		if not ok then journal("Vidage : " .. tostring(why) .. " (slot " .. tostring(slot) .. ")") end
+
+		if ccFuel.level() < CONFIG.fuelTopUp then
+			ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
+			local fine, reason = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
+			if not fine then journal("Carburant : " .. tostring(reason)) end
+		end
+
+		if not findSapling() then fetchSaplings(where) end
+
+		if CONFIG.makeCharcoal then
+			local fine, reason = runFurnace(where)
+			if not fine then journal("Four : " .. tostring(reason)) end
+		end
+
+		ccInv.tidy(fuelSlotForTidy())
+	else
+		-- Sans conteneur, on jette au moins le rebut : sans cela l'inventaire
+		-- se remplit de feuilles et la turtle s'arrête au bout d'un arbre.
+		ccInv.dumpTrash("up", { protect = protectedSlots() })
+	end
+
+	ccNav.turnTo(0)
+
+	if ctx.abort or ctx.stopped then return S.DONE end
+
+	-- L'arrêt sur compte atteint appartient à PLANTATION, qui replante d'abord.
+	-- On ne repart QUE si les conditions du retour sont levées.
+	if ccInv.freeCount() <= CONFIG.spareSlots then
+		journal("Inventaire plein : vider la turtle ou lui donner un conteneur")
+		ctx.afterWait = S.SERVICE
+		return S.AWAIT
+	end
+	if not findSapling() then
+		journal("Plus de sapling : en mettre dans le conteneur")
+		ctx.afterWait = S.SERVICE
+		return S.AWAIT
+	end
+	if ccFuel.level() <= ccFuel.reserve(TREE, nil, CONFIG.fuelMargin) then
+		journal("Carburant insuffisant : en fournir a la turtle")
+		ctx.afterWait = S.SERVICE
+		return S.AWAIT
+	end
+
+	ctx.reason = nil
+	return S.TEND
+end
+
+--- Attend une intervention humaine. Réveil sur changement d'inventaire, et sur
+--- minuteur pour que les commandes reçues entre-temps soient traitées.
+STATES[S.AWAIT] = function()
+	local timer = os.startTimer(5)
+	repeat
+		local event, id = waitEvent()
+		if ctx.stopped then return S.AWAIT end
+	until event == "turtle_inventory" or (event == "timer" and id == timer)
+
+	return ctx.afterWait or S.SERVICE
+end
+
+STATES[S.PAUSED] = function()
+	waitEvent()
+	return S.PAUSED
+end
+
+-- ---------------------------------------------------------------------------
+-- Démarrage
+-- ---------------------------------------------------------------------------
+
+local function usage()
+	print("ccChopper           ferme sans fin")
+	print("ccChopper <n>       abat n arbres puis s'arrete")
+	print("ccChopper del       oublie le travail en cours")
+	print("ccChopper config    cree ou affiche les options")
+	print("ccChopper update    met les APIs a jour")
+	print("")
+	print("La turtle doit REGARDER la case de plantation,")
+	print("avec un conteneur contre elle (et un four pour le charbon).")
+	print("Options : edit " .. CONFIG_PATH)
+end
+
+local function setup(a)
+	store = ccSave.store(SAVE_PATH, { version = SAVE_VERSION, migrations = MIGRATIONS })
+
+	if a[1] == "del" then
+		store.delete()
+		removeStartup()
+		print("Travail en cours oublie.")
+		return false
+	end
+
+	if a[1] == "config" then
+		local _, warnings, created = ccConfig.load(CONFIG_PATH, DEFAULTS, CONFIG_TEMPLATE)
+		print(created and ("Options creees : " .. CONFIG_PATH)
+			or ("Options existantes : " .. CONFIG_PATH))
+		for _, w in ipairs(warnings) do print("  " .. w) end
+		print("Modifier avec : edit " .. CONFIG_PATH)
+		return false
+	end
+
+	if a[1] ~= nil then
+		local n = tonumber(a[1])
+		if not n or n <= 0 or n ~= math.floor(n) then
+			print("Argument invalide : " .. tostring(a[1]))
+			usage()
+			return false
+		end
+		ctx.target = n
+	end
+
+	-- Reprise : la position est restaurée, l'état repart par un retour à
+	-- l'origine. La récursion d'abattage ne se sauvegarde pas -- c'est une
+	-- pile d'appels Lua -- donc reprendre en plein arbre n'a pas de sens.
+	local saved = store.read()
+	if saved and saved.pos then
+		ccNav.setPosition(saved.pos)
+		ctx.trees = saved.trees or 0
+		if ctx.target == nil then ctx.target = saved.target end
+		ctx.state = S.CALIBRATE
+		if saved.state == S.CHOP or saved.state == S.RETURN then
+			journal("Reprise en " .. tostring(saved.state) .. " : retour a l'origine")
+		end
+	end
+
+	installStartup()
+	return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Boucle principale
+-- ---------------------------------------------------------------------------
+
+local function machine()
+	while not ctx.stopped do
+		applyCommands()
+
+		if ctx.state == S.DONE or ctx.state == S.FAILED then
+			ctx.stopped = true
+			break
+		end
+
+		local fn = STATES[ctx.state]
+		if not fn then
+			ctx.error = "etat inconnu : " .. tostring(ctx.state)
+			journal(ctx.error)
+			ctx.state = S.FAILED
+			ctx.stopped = true
+			break
+		end
+
+		local before = ctx.state
+		local ok, result = pcall(fn)
+		if not ok then
+			ctx.error = tostring(result)
+			journal("Erreur en " .. before .. " : " .. ctx.error)
+			ctx.state = S.FAILED
+		elseif result == nil then
+			ctx.error = "l'etat " .. before .. " n'a renvoye aucun etat suivant"
+			journal(ctx.error)
+			ctx.state = S.FAILED
+		else
+			ctx.state = result
+		end
+
+		if ctx.state ~= before and ctx.state ~= S.DONE and ctx.state ~= S.FAILED then
+			journal(ctx.state)
+			save()
+		end
+		draw()
 	end
 end
 
-parallel.waitForAll(mainLoop, eventLoop)
+local function events()
+	while not ctx.stopped do
+		collect()
+		draw()
+	end
+end
+
+-- L'ordre compte : ccNav.reset() remet la position à l'origine, il doit donc
+-- précéder setup(), qui la restaure depuis la sauvegarde. Les options sont
+-- lues avant tout le reste : elles décident de ce qui est reconnu comme bois,
+-- donc de ce que la turtle casse dès le premier mouvement.
+local configWarnings, configCreated
+CONFIG, configWarnings, configCreated = ccConfig.load(CONFIG_PATH, DEFAULTS, CONFIG_TEMPLATE)
+
+ccNav.reset()
+ccInv.reset({
+	trash = CONFIG.trash,
+	depotMinSlots = CONFIG.depotMinSlots,
+	depotPatterns = CONFIG.depotPatterns,
+})
+if not setup(args) then return end
+
+-- Sauvegarde à CHAQUE changement d'état suivi -- déplacement ET rotation. En
+-- quittant la partie, le jeu n'accorde qu'un tick à la turtle : si elle vient
+-- de pivoter sans que ce soit enregistré, elle rouvre avec un cap erroné.
+ccNav.configure({ onChange = function() save() end })
+
+setupUi()
+ctx.drawTimer = os.startTimer(0.5)
+
+if configCreated then journal("Options creees : " .. CONFIG_PATH) end
+for _, w in ipairs(configWarnings) do journal("Options : " .. w) end
+journal(("Feuilles : %s, charbon : %s")
+	:format(CONFIG.chopLeaves and "coupees" or "epargnees",
+	        CONFIG.makeCharcoal and "oui" or "non"))
+
+save()
+
+parallel.waitForAny(machine, events)
+
+ccUi.clear()
+if ctx.interrupted then
+	save()
+	journal("Interrompu par Ctrl+T")
+	print("Interrompu. Le travail est sauvegarde.")
+	print("")
+	print("  edit " .. CONFIG_PATH .. "   modifier les options")
+	print("  ccChopper           reprendre")
+	print("  ccChopper del       oublier")
+
+elseif ctx.state == S.DONE then
+	store.delete()
+	removeStartup()
+	print(("Termine : %d arbre(s) abattu(s)."):format(ctx.trees))
+else
+	print("Arret en etat " .. ctx.state .. ".")
+	if ctx.error then print(ctx.error) end
+	print("Journal complet : edit " .. LOG_PATH)
+end

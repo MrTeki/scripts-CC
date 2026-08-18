@@ -99,6 +99,18 @@ function M.setChest(x, y, z, contents, size)
 	})
 end
 
+--- Four posé dans le monde. Trois slots, comme en jeu : 1 entrée, 2 foyer,
+--- 3 sortie. `ptype` est ce que renvoie peripheral.getType, et c'est ce qui
+--- permet de le distinguer d'un coffre.
+function M.setFurnace(x, y, z, contents)
+	M.setBlock(x, y, z, {
+		name = "minecraft:furnace",
+		ptype = "minecraft:furnace",
+		inventory = contents or {},
+		size = 3,
+	})
+end
+
 function M.spawnEntity(x, y, z, hp)
 	entities[key(x, y, z)] = { hp = hp or 2 }
 end
@@ -784,10 +796,113 @@ function M.install()
 		return nil
 	end
 
+	--- Range `count` objets dans un inventaire de bloc.
+	-- `toSlot` non nil vise CE slot et lui seul : c'est le contrat que
+	-- ccChopper doit respecter pour alimenter un four, et que l'ancienne
+	-- version ignorait -- sans slot de destination, le combustible finissait
+	-- dans le slot d'entrée.
+	-- @return nombre réellement rangé
+	local function insertInto(block, name, count, toSlot)
+		local inv, size = block.inventory, block.size
+
+		local function fits(slot)
+			local cur = inv[slot]
+			if not cur then return math.min(MAX_STACK, count) end
+			if cur.name ~= name then return 0 end
+			return math.min(MAX_STACK - cur.count, count)
+		end
+
+		local function put(slot, n)
+			if n <= 0 then return 0 end
+			if inv[slot] then inv[slot].count = inv[slot].count + n
+			else inv[slot] = { name = name, count = n } end
+			return n
+		end
+
+		if toSlot then
+			if toSlot < 1 or toSlot > size then return 0 end
+			return put(toSlot, fits(toSlot))
+		end
+
+		local moved = 0
+		for slot = 1, size do
+			if moved >= count then break end
+			local n = math.min(fits(slot), count - moved)
+			moved = moved + put(slot, n)
+		end
+		return moved
+	end
+
+	--- Inventaire générique d'un bloc voisin, tel que l'API peripheral l'expose
+	--- sur CC:Tweaked récent. Sans cela, peripheral.wrap("front") renvoyait nil
+	--- alors qu'en jeu il rend le conteneur.
+	local function inventoryApi(block)
+		local api = {}
+
+		function api.size() return block.size end
+
+		function api.list()
+			local out = {}
+			for slot, item in pairs(block.inventory) do
+				out[slot] = { name = item.name, count = item.count }
+			end
+			return out
+		end
+
+		function api.getItemDetail(slot)
+			local item = block.inventory[slot]
+			if not item then return nil end
+			return { name = item.name, count = item.count, maxCount = MAX_STACK }
+		end
+
+		--- Le nom de la cible est résolu dans le contexte de l'ORDINATEUR
+		--- appelant, comme en jeu : « front », « top » et « bottom » sont donc
+		--- des noms valides pour un bloc voisin du turtle.
+		local function resolve(name)
+			local target = adjacentBlock(name)
+			if target and target.inventory then return target end
+			return nil
+		end
+
+		function api.pushItems(toName, fromSlot, limit, toSlot)
+			local target = resolve(toName)
+			if not target then error("No such peripheral: " .. tostring(toName), 0) end
+			local item = block.inventory[fromSlot]
+			if not item then return 0 end
+			local moved = insertInto(target, item.name,
+				math.min(limit or MAX_STACK, item.count), toSlot)
+			item.count = item.count - moved
+			if item.count == 0 then block.inventory[fromSlot] = nil end
+			return moved
+		end
+
+		function api.pullItems(fromName, fromSlot, limit, toSlot)
+			local source = resolve(fromName)
+			if not source then error("No such peripheral: " .. tostring(fromName), 0) end
+			local item = source.inventory[fromSlot]
+			if not item then return 0 end
+			local moved = insertInto(block, item.name,
+				math.min(limit or MAX_STACK, item.count), toSlot)
+			item.count = item.count - moved
+			if item.count == 0 then source.inventory[fromSlot] = nil end
+			return moved
+		end
+
+		return api
+	end
+
 	_G.peripheral = {
 		getNames = function()
 			local out = {}
 			for _, p in ipairs(peripherals) do out[#out + 1] = p.side end
+			-- Les blocs voisins EN FONT PARTIE : vérifié en jeu sur CC:Tweaked
+			-- récent, un turtle voit son coffre et son four dans getNames.
+			-- C'est ce qui permet à ccChopper de trouver un four sans savoir
+			-- d'avance de quel côté il est.
+			for _, side in ipairs({ "front", "top", "bottom" }) do
+				local b = adjacentBlock(side)
+				if b and b.inventory then out[#out + 1] = side end
+			end
 			return out
 		end,
 		getType = function(side)
@@ -795,7 +910,9 @@ function M.install()
 				if p.side == side then return p.ptype end
 			end
 			local b = adjacentBlock(side)
-			if b and b.inventory then return "inventory" end
+			-- Un bloc peut déclarer son type -- « minecraft:furnace » -- comme
+			-- en jeu ; à défaut il n'est qu'un inventaire.
+			if b and b.inventory then return b.ptype or "inventory" end
 			return nil
 		end,
 		hasType = function(side, wanted)
@@ -803,7 +920,9 @@ function M.install()
 				if p.side == side then return p.ptype == wanted end
 			end
 			local b = adjacentBlock(side)
-			if b and b.inventory then return wanted == "inventory" end
+			if b and b.inventory then
+				return wanted == "inventory" or wanted == b.ptype
+			end
 			return nil
 		end,
 		isPresent = function(side)
@@ -817,13 +936,18 @@ function M.install()
 				if p.side == side then return p.api[method](...) end
 			end
 			local b = adjacentBlock(side)
-			if b and b.inventory and method == "size" then return b.size end
+			if b and b.inventory then
+				local api = inventoryApi(b)
+				if api[method] then return api[method](...) end
+			end
 			error("No such peripheral: " .. tostring(side), 0)
 		end,
 		wrap = function(side)
 			for _, p in ipairs(peripherals) do
 				if p.side == side then return p.api end
 			end
+			local b = adjacentBlock(side)
+			if b and b.inventory then return inventoryApi(b) end
 			return nil
 		end,
 		find = function(ptype)

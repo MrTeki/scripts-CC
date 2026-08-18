@@ -12,7 +12,7 @@ le disque (`F:\Minecraft\scripts CC\*.lua`) sont désormais du legacy.
 | Script | Machine | Rôle |
 |---|---|---|
 | `ccQuarry.lua` | turtle | Creuse une carrière rectangulaire, avec reprise après reboot |
-| `ccChopper.lua` | turtle | Ferme à arbres : abattage, replantage, four à charbon de bois |
+| `ccChopper.lua` | turtle | Ferme à arbres : abattage, replantage, four à charbon, reprise après reboot |
 | `ccStairs.lua` | turtle | Creuse un escalier descendant, pose marches et torches |
 | `ccFarm.lua` | turtle | Ferme à cultures : récolte et replantage |
 | `ccInventory.lua` | computer | Gestion d'inventaire en réseau : coffres, moniteurs, crafting |
@@ -72,8 +72,23 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | `ccUi` | fait | journal à ring buffer, `drawBar`, boutons clavier/souris/tactile, moniteur |
 | `ccNet` | fait | sert `ccRemoteProtocol` sans bloquer, commandes mises en file |
 
-`ccQuarry.lua` les consomme toutes. `test/test_integration.lua` les valide
-ensemble, et `test/test_ccQuarry.lua` exécute le script entier sous le mock.
+`ccQuarry.lua` les consomme toutes ; `ccChopper.lua` toutes sauf `ccPlan` et
+`ccNet`. `test/test_integration.lua` les valide ensemble, et
+`test/test_ccQuarry.lua` comme `test/test_ccChopper.lua` exécutent le script
+entier sous le mock.
+
+Deux besoins de `ccChopper` n'ont pas d'équivalent dans les APIs, et vivent donc
+dans le script :
+
+- **Le creusement sélectif.** L'option `dig` de `ccNav` est un booléen, pas un
+  prédicat. Tous les mouvements du chopper passent donc en `dig = false`, et la
+  décision de casser — bois et feuilles, rien d'autre — reste dans le script.
+  Sans cela, un trajet raserait le décor, le conteneur et le four.
+- **Le retour hors de l'arbre.** `goTo` aligne les axes en ligne droite, ce qui
+  n'a pas de sens au milieu d'une canopée. L'abattage est récursif et chaque
+  appel revient sur sa case d'appel : la pile d'appels Lua *est* le chemin de
+  retour. Un trajet de secours par-dessus la canopée prend le relais après un
+  redémarrage, quand cette pile est perdue.
 
 Deux règles structurantes, valables pour tout script qui les consomme :
 
@@ -146,8 +161,8 @@ Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossie
 ## État
 
 `main` contient les scripts tels qu'ils tournaient avant refonte, sans
-modification. La refonte de `ccQuarry.lua` et l'extraction des APIs se font sur
-`refonte/apis-socle`.
+modification. La refonte de `ccQuarry.lua` et de `ccChopper.lua`, et
+l'extraction des APIs, se font sur `refonte/apis-socle`.
 
 Ce qui reste à faire, les limites connues et les vérifications en attente sont
 dans [ROADMAP.md](ROADMAP.md).
