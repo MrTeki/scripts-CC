@@ -152,11 +152,18 @@ Ce ne sont pas des bugs, mais des contraintes assumées, à connaître.
 
 Ce qui n'a jamais tourné en conditions réelles, et qu'un essai devrait couvrir.
 
-- **`turtle.refuel(0)`**, pivot de tout `refuelFromChest`. Le contrat « count = 0
-  ne consomme rien » est documenté côté CC:Tweaked mais n'a pas été confirmé en
-  jeu. Pour le déclencher : peu de carburant en slot 1, une pile de charbon dans
-  le conteneur, et un chantier profond.
+- **Le cycle complet de `refuelFromChest`** : aspirer, tester, retenir le rebut,
+  restituer dans l'ordre. La primitive sur laquelle il repose,
+  `turtle.refuel(0)`, est **confirmée en jeu** -- elle renvoie true sur un
+  combustible sans rien consommer -- mais l'enchaînement complet avec un vrai
+  conteneur n'a jamais tourné. Pour le déclencher : peu de carburant en slot 1,
+  une pile de charbon dans le conteneur, et un chantier profond.
 - **Le ravitaillement au conteneur fixe**, ajouté en même temps.
-- **La reprise après un vrai reboot de chunk**, par opposition à un `Ctrl+T`
-  volontaire.
 - **Le mode `dropWhenNoChest = true`**, jamais exercé en jeu.
+
+Confirmé depuis la rédaction de cette liste :
+
+- `turtle.refuel(0)` répond sans consommer.
+- `peripheral` voit bien les blocs voisins d'un turtle sur CC:Tweaked récent.
+- La reprise après un vrai rechargement de partie -- elle a d'ailleurs révélé
+  que les rotations n'étaient pas sauvegardées.

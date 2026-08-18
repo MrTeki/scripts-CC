@@ -58,9 +58,14 @@ end
 function M.isUnlimited() return M.level() == math.huge end
 
 --- Le slot sélectionné est-il du combustible ?
--- turtle.refuel(0) répond sans rien consommer. C'est ce qui rend inutile la
--- table fuelNames de ccQuarry, jamais lue, et qui de toute façon contenait des
--- noms d'affichage et non des identifiants de registre.
+--
+-- turtle.refuel(0) répond sans rien consommer. VÉRIFIÉ EN JEU : renvoie bien
+-- true sur un combustible, sans entamer la pile ni le niveau de carburant.
+--
+-- C'est ce qui rend inutile la table fuelNames de ccQuarry -- jamais lue, et
+-- qui de toute façon contenait des noms d'affichage plutôt que des
+-- identifiants de registre. Cette voie-ci fonctionne avec n'importe quel mod,
+-- sans liste à tenir à jour.
 function M.isFuel()
 	return turtle.refuel(0)
 end
