@@ -148,3 +148,6 @@ Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossie
 `main` contient les scripts tels qu'ils tournaient avant refonte, sans
 modification. La refonte de `ccQuarry.lua` et l'extraction des APIs se font sur
 `refonte/apis-socle`.
+
+Ce qui reste à faire, les limites connues et les vérifications en attente sont
+dans [ROADMAP.md](ROADMAP.md).
