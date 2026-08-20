@@ -11,9 +11,13 @@ reste, par ordre de valeur décroissante.
 ### Fusionner `refonte/apis-socle` dans `main`
 
 `REPO` pointe encore sur la branche de refonte. Une fois fusionnée, rebasculer
-la constante en tête de [ccQuarry.lua](ccQuarry.lua) sur `.../scripts-CC/main/`.
-Ça raccourcit l'URL d'installation et évite d'oublier qu'on tourne sur une
-branche.
+la constante en tête de [ccQuarry.lua](ccQuarry.lua) **et de**
+[ccChopper.lua](ccChopper.lua) sur `.../scripts-CC/main/`. Ça raccourcit l'URL
+d'installation et évite d'oublier qu'on tourne sur une branche.
+
+C'est la seule chose que le manifeste ne peut pas porter — il faut bien une URL
+en dur pour aller le chercher. La corvée grandit donc d'une ligne par script
+migré : à six scripts, prévoir un `sed` plutôt que six éditions à la main.
 
 ### Détecter les APIs modifiées sans montée de version
 
