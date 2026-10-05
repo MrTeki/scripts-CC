@@ -27,6 +27,7 @@ local MODULES = {
 	"test_integration",
 	"test_ccQuarry",
 	"test_ccChopper",
+	"test_needs",
 }
 
 local H = require("harness")

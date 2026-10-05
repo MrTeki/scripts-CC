@@ -42,8 +42,11 @@
 -- .../scripts-CC/main/ une fois refonte/apis-socle fusionnée.
 local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/refonte/apis-socle/"
 
+-- Dépendances TRANSITIVES comprises : ccBoot n'installe que ce qui est listé.
+-- ccUtil n'est pas utilisé ici, mais ccUi le requiert -- l'oublier faisait
+-- planter le premier lancement sur une turtle neuve.
 local NEEDS = {
-	ccVec = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
+	ccUtil = 1, ccVec = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
 	ccFuel = 1, ccSave = 1, ccUi = 1,
 }
 
