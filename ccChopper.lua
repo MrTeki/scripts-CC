@@ -109,6 +109,7 @@ local DEFAULTS = {
 	fertilize = true,         -- utiliser la poudre d'os sur les jeunes pousses
 
 	growWait = 20,            -- secondes entre deux inspections d'une pousse
+	fertilizeWait = 1,        -- idem, quand la poudre d'os vient d'être posée
 	maxDepth = 96,            -- profondeur d'exploration depuis le tronc, en
 	                          -- nombre de cases enchaînées
 	maxHeight = 40,           -- plafond du trajet de secours, au-dessus de l'origine
@@ -170,6 +171,11 @@ return {
     -- inspectait 20 fois par seconde et vidait une pile de poudre d'os en
     -- quelques secondes.
     growWait = 20,
+
+    -- Pause apres une poudre d'os. Courte : une application ne fait pousser
+    -- qu'environ une fois sur deux, inutile d'attendre la pousse naturelle
+    -- tant qu'il en reste.
+    fertilizeWait = 1,
 
     -- Garde-fou : profondeur d'exploration depuis le tronc, en nombre de
     -- cases enchainees. Ce n'est pas un total de blocs casses : un arbre de
@@ -890,23 +896,29 @@ STATES[S.TEND] = function()
 	end
 
 	if isSapling(name) then
+		local fertilized = false
 		if CONFIG.fertilize then
 			local bone = ccInv.find("minecraft:bone_meal")
 			if bone then
 				turtle.select(bone)
-				turtle.place()
+				fertilized = turtle.place()
 				ccInv.selectForMining()
 			end
 		end
 
 		-- Attente sur MINUTEUR, pas en boucle serrée. L'ancienne version
 		-- tournait à vide 20 fois par seconde -- sleep(0) -- et reposait de la
-		-- poudre d'os à chaque tour : une pile partait en quelques secondes.
+		-- poudre d'os à chaque tour.
+		--
+		-- Deux durées. Une poudre d'os ne fait pousser qu'environ une fois sur
+		-- deux : tant qu'il en reste et qu'elle prend, on réessaie vite. La
+		-- longue attente est réservée à la pousse naturelle -- l'appliquer
+		-- aussi après une poudre d'os donnait 20 s entre deux applications.
 		--
 		-- L'attente est aussi le seul moment où ce script est disponible pour
 		-- l'utilisateur : les événements sont donc traduits en commandes ici,
 		-- et consommés par applyCommands au tour suivant.
-		local timer = os.startTimer(CONFIG.growWait)
+		local timer = os.startTimer(fertilized and CONFIG.fertilizeWait or CONFIG.growWait)
 		while true do
 			local e = { waitEvent() }
 			if ctx.stopped then return S.TEND end

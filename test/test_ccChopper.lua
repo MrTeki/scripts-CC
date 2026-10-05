@@ -517,3 +517,61 @@ H.case("deux arbres d'affilée : la ferme boucle", function()
 	H.eq(chestSummary()[LOG], 8, "les bûches des deux arbres sont déposées")
 	H.eq(mock.getBlock(1, 0, 0).name, SAPLING, "et un sapling est replanté")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Poudre d'os
+-- ---------------------------------------------------------------------------
+
+--- Simule la poudre d'os : turtle.place() sur le sapling la consomme, et
+--- l'arbre pousse à la `poussee`-ième application. Le place du mock, lui,
+--- refuse toute case occupée.
+local function boneMeal(poussee)
+	local vraiPlace = turtle.place
+	local applications = 0
+	turtle.place = function()
+		local t = mock.getTurtle()
+		local d = turtle.getItemDetail()
+		local front = mock.getBlock(1, 0, 0)
+		if d and d.name == "minecraft:bone_meal" and t.x == 0 and t.y == 0 and t.z == 0
+			and t.dir == 0 and front and front.name == SAPLING then
+			mock.setSlot(turtle.getSelectedSlot(), d.count > 1 and d.name or nil, d.count - 1)
+			applications = applications + 1
+			if applications >= poussee then plantTree() end
+			return true
+		end
+		return vraiPlace()
+	end
+	return function() return applications end
+end
+
+H.case("RÉGRESSION : la poudre d'os est réappliquée sans attendre la pousse naturelle", function()
+	-- Constaté en jeu : 20 s entre deux applications, l'attente de la pousse
+	-- naturelle étant appliquée aussi après une poudre d'os.
+	terrain({ noTree = true })
+	mock.setBlock(1, 0, 0, SAPLING)
+	mock.setSlot(3, "minecraft:bone_meal", 10)
+	local applications = boneMeal(3)
+
+	run("1")
+
+	H.eq(applications(), 3, "trois applications")
+	H.eq(treeBlocks(), 0, "l'arbre poussé est abattu")
+	H.ok(os.clock() < 20, "moins d'une attente naturelle au total : " .. os.clock() .. " s")
+end)
+
+H.case("la poudre d'os restante reste à bord", function()
+	terrain({ noTree = true })
+	mock.setBlock(1, 0, 0, SAPLING)
+	mock.setSlot(3, "minecraft:bone_meal", 10)
+	boneMeal(3)
+
+	run("1")
+
+	H.eq(chestSummary()["minecraft:bone_meal"], nil, "rien au coffre")
+	local reste = 0
+	for slot = 1, 16 do
+		local d = turtle.getItemDetail(slot)
+		if d and d.name == "minecraft:bone_meal" then reste = reste + d.count end
+	end
+	H.eq(reste, 7, "sept poudres d'os restantes")
+end)
