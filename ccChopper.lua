@@ -47,7 +47,7 @@ local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/refonte/apis-s
 -- planter le premier lancement sur une turtle neuve.
 local NEEDS = {
 	ccUtil = 1, ccVec = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
-	ccFuel = 1, ccSave = 1, ccUi = 1,
+	ccFuel = 2, ccSave = 1, ccUi = 1,
 }
 
 local args = { ... }
@@ -651,8 +651,25 @@ end
 -- test `chestSide == "down"` ne matchait jamais -- l'API peripheral nomme ce
 -- côté « bottom ». Avec un coffre en dessous, la turtle vidait donc DEVANT
 -- elle, au sol.
+--
+-- Le conteneur trouvé est MÉMORISÉ, cap compris, et vérifié en premier au
+-- service suivant. Sans cela, chaque service refaisait le tour complet ; et
+-- comme une attente relance un service toutes les quelques secondes, la
+-- turtle tournait sur elle-même sans fin en attendant qu'on la serve.
 -- @return "forward", "up", "down", ou nil
 local function findDepot()
+	local known = ctx.depot
+	if known then
+		if known.dir then ccNav.turnTo(known.dir) end
+		if ccInv.depotAt(known.where) then return known.where end
+		ctx.depot = nil
+	end
+
+	local function remember(where)
+		ctx.depot = { where = where, dir = where == "forward" and ccNav.position().dir or nil }
+		return where
+	end
+
 	local seen = {}
 
 	local function describe(name, slots)
@@ -661,14 +678,14 @@ local function findDepot()
 
 	for _ = 1, 4 do
 		local found, name, slots = ccInv.depotAt("forward")
-		if found then return "forward" end
+		if found then return remember("forward") end
 		if name then seen[#seen + 1] = describe(name, slots) end
 		ccNav.turnRight()
 	end
 
 	for _, where in ipairs({ "up", "down" }) do
 		local found, name, slots = ccInv.depotAt(where)
-		if found then return where end
+		if found then return remember(where) end
 		if name then seen[#seen + 1] = describe(name, slots) end
 	end
 
@@ -837,6 +854,34 @@ local function fetchSaplings(where)
 		break
 	end
 	return false
+end
+
+--- Ravitaillement au service, en deux étages.
+--
+-- Le combustible « propre » -- charbon, bâtons -- est brûlé jusqu'à
+-- fuelTopUp. Le bois ne l'est que pour atteindre le plancher qui permet
+-- d'abattre l'arbre suivant : c'est la récolte, pas une réserve. Les saplings
+-- ne le sont jamais.
+--
+-- Constaté en jeu : sans filtre, ccFuel brûlait tout ce qui est combustible
+-- pour viser fuelTopUp, saplings compris. La turtle se retrouvait sans rien à
+-- replanter, et attendait qu'on lui en rende.
+-- @param where  direction du conteneur, ou nil sans conteneur
+local function refuel(where)
+	local function clean(name) return not isSapling(name) and not isWood(name) end
+	local function any(name) return not isSapling(name) end
+
+	if ccFuel.level() < CONFIG.fuelTopUp then
+		ccFuel.refuelFromInventory(CONFIG.fuelTopUp, { accept = clean })
+		if where then ccFuel.refuelFromChest(where, CONFIG.fuelTopUp, { accept = clean }) end
+	end
+
+	local floor = 2 * CONFIG.fuelMargin
+	if ccFuel.level() < floor then
+		ccFuel.refuelFromInventory(floor, { accept = any })
+		if where then ccFuel.refuelFromChest(where, floor, { accept = any }) end
+	end
+	ccInv.selectForMining()
 end
 
 -- ---------------------------------------------------------------------------
@@ -1038,10 +1083,18 @@ STATES[S.SERVICE] = function()
 		})
 		if not ok then journal("Vidage : " .. tostring(why) .. " (slot " .. tostring(slot) .. ")") end
 
-		if ccFuel.level() < CONFIG.fuelTopUp then
-			ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
-			local fine, reason = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
-			if not fine then journal("Carburant : " .. tostring(reason)) end
+		refuel(where)
+
+		-- refuelFromChest garde à bord le reste d'une pile entamée : c'est
+		-- voulu pour du charbon, mais l'étage « bois » aspire alors une pile
+		-- de bûches, en brûle une ou deux, et rapporte le reste dans la
+		-- turtle. La récolte quittait le coffre à chaque service. Le bois
+		-- n'étant jamais protégé, un second vidage le rend.
+		if ccInv.lootCount(protectedSlots()) > 0 then
+			ccInv.unload(where, {
+				trashWhere = (where == "up") and "down" or "up",
+				protect = protectedSlots(),
+			})
 		end
 
 		if not findSapling() then fetchSaplings(where) end
@@ -1056,6 +1109,7 @@ STATES[S.SERVICE] = function()
 		-- Sans conteneur, on jette au moins le rebut : sans cela l'inventaire
 		-- se remplit de feuilles et la turtle s'arrête au bout d'un arbre.
 		ccInv.dumpTrash("up", { protect = protectedSlots() })
+		refuel(nil)
 	end
 
 	ccNav.turnTo(0)
@@ -1069,7 +1123,10 @@ STATES[S.SERVICE] = function()
 		ctx.afterWait = S.SERVICE
 		return S.AWAIT
 	end
-	if not findSapling() then
+	-- Un sapling n'est exigé que si la case de plantation est VIDE. Un arbre
+	-- adulte qui attend d'être abattu n'en demande pas : l'exiger bloquait la
+	-- turtle en attente devant l'arbre même qui allait lui en fournir.
+	if blockAt("forward") == nil and not findSapling() then
 		journal("Plus de sapling : en mettre dans le conteneur")
 		ctx.afterWait = S.SERVICE
 		return S.AWAIT
@@ -1081,17 +1138,27 @@ STATES[S.SERVICE] = function()
 	end
 
 	ctx.reason = nil
+	ctx.awaitDelay = nil
 	return S.TEND
 end
 
 --- Attend une intervention humaine. Réveil sur changement d'inventaire, et sur
---- minuteur pour que les commandes reçues entre-temps soient traitées.
+--- minuteur pour revérifier le conteneur, où l'utilisateur a pu déposer ce
+--- qui manque sans que la turtle en soit avertie.
+--
+-- Le délai double à chaque réveil sans effet, de 5 s jusqu'à une minute : une
+-- attente qui dure n'a pas à relancer un service complet toutes les 5 s. Une
+-- intervention directe sur l'inventaire le remet à zéro.
 STATES[S.AWAIT] = function()
-	local timer = os.startTimer(5)
+	ctx.awaitDelay = math.min((ctx.awaitDelay or 2.5) * 2, 60)
+	local timer = os.startTimer(ctx.awaitDelay)
+	local event, id
 	repeat
-		local event, id = waitEvent()
+		event, id = waitEvent()
 		if ctx.stopped then return S.AWAIT end
 	until event == "turtle_inventory" or (event == "timer" and id == timer)
+
+	if event == "turtle_inventory" then ctx.awaitDelay = nil end
 
 	return ctx.afterWait or S.SERVICE
 end

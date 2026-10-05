@@ -32,6 +32,9 @@ local FUEL_VALUES = {
 	["minecraft:lava_bucket"] = 1000,
 	["minecraft:oak_log"]     = 15,
 	["minecraft:stick"]       = 5,
+	-- Un sapling brûle aussi, comme en jeu : c'est ce qui permettait à
+	-- ccChopper de brûler ses propres saplings au ravitaillement.
+	["minecraft:oak_sapling"] = 5,
 }
 
 local DELTA = {

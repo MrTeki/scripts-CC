@@ -34,7 +34,7 @@
 local ccInv = require("ccInv")
 local ccVec = require("ccVec")
 
-local M = { _VERSION = 1 }
+local M = { _VERSION = 2 }
 
 local ORIGIN = { x = 0, y = 0, z = 0 }
 
@@ -149,10 +149,24 @@ end
 -- Ravitaillement
 -- ---------------------------------------------------------------------------
 
+--- Le combustible de ce slot sélectionné est-il accepté par le filtre ?
+local function accepted(opts)
+	if not opts.accept then return true end
+	local d = turtle.getItemDetail()
+	return d ~= nil and opts.accept(d.name) == true
+end
+
 --- Brûle le combustible déjà présent dans l'inventaire.
 -- Le coffre transportable est épargné : un coffre en bois est combustible.
+--
+-- `opts.accept(nom)` restreint ce qui peut être brûlé. Ajouté pour
+-- ccChopper : un sapling est combustible, une bûche aussi, et sans filtre une
+-- ferme à arbres brûlait ses propres saplings pour viser son niveau cible --
+-- puis attendait qu'on lui en rende pour replanter.
+-- @param opts { accept = function(nom) -> booléen }
 -- @return true, ou false + "not_enough_fuel" | "no_fuel_found"
-function M.refuelFromInventory(target)
+function M.refuelFromInventory(target, opts)
+	opts = opts or {}
 	local chest = ccInv.findChest()
 	local found = false
 
@@ -160,7 +174,7 @@ function M.refuelFromInventory(target)
 		if M.level() >= target then break end
 		if slot ~= chest and turtle.getItemCount(slot) > 0 then
 			turtle.select(slot)
-			if M.isFuel() then
+			if M.isFuel() and accepted(opts) then
 				found = true
 				M.burnUpTo(target)
 			end
@@ -179,7 +193,9 @@ end
 --
 -- @param where   "forward", "up" ou "down"
 -- @param target  niveau de carburant visé
--- @param opts    { scratch = nombre de piles à examiner au plus }
+-- @param opts    { scratch = nombre de piles à examiner au plus,
+--                  accept = function(nom) : seul le combustible accepté est
+--                  brûlé, le reste est rendu comme du rebut }
 -- @return true, ou false + "chest_full" | "not_enough_fuel" | "no_fuel_found"
 function M.refuelFromChest(where, target, opts)
 	opts = opts or {}
@@ -195,7 +211,7 @@ function M.refuelFromChest(where, target, opts)
 		if not slot then break end
 		if not ccInv.suckFrom(where, slot) then break end   -- coffre épuisé
 
-		if M.isFuel() then
+		if M.isFuel() and accepted(opts) then
 			sawFuel = true
 			M.burnUpTo(target)
 			if turtle.getItemCount(slot) > 0 then

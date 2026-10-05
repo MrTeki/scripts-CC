@@ -17,7 +17,7 @@ return {
 		ccPlan  = { version = 1, path = "apis/ccPlan.lua" },
 		ccNav   = { version = 1, path = "apis/ccNav.lua" },
 		ccInv   = { version = 1, path = "apis/ccInv.lua" },
-		ccFuel  = { version = 1, path = "apis/ccFuel.lua" },
+		ccFuel  = { version = 2, path = "apis/ccFuel.lua" },
 		ccSave  = { version = 1, path = "apis/ccSave.lua" },
 		ccUi    = { version = 1, path = "apis/ccUi.lua" },
 		ccNet   = { version = 1, path = "apis/ccNet.lua" },

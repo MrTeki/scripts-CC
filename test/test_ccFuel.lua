@@ -234,3 +234,43 @@ H.case("carburant illimité : le coffre n'est même pas touché", function()
 	H.ok(ccFuel.refuelFromChest("down", 500), "aucun besoin")
 	H.eq(mock.getBlock(0, 0, -1).inventory[1].count, 64, "coffre intact")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Filtre accept
+-- ---------------------------------------------------------------------------
+
+local function notSapling(name) return not name:find("_sapling", 1, true) end
+
+H.case("refuelFromInventory ne brûle pas ce que le filtre refuse", function()
+	-- Constaté en jeu sur ccChopper : un sapling est combustible, et la ferme
+	-- brûlait ses propres saplings pour viser son niveau cible.
+	fresh({ fuel = 0 })
+	mock.setSlot(2, "minecraft:oak_sapling", 16)
+	mock.setSlot(3, "minecraft:coal", 1)
+
+	ccFuel.refuelFromInventory(10000, { accept = notSapling })
+
+	H.eq(turtle.getItemCount(2), 16, "les saplings sont intacts")
+	H.eq(turtle.getItemCount(3), 0, "le charbon est brûlé")
+end)
+
+H.case("refuelFromInventory sans filtre brûle tout combustible", function()
+	fresh({ fuel = 0 })
+	mock.setSlot(2, "minecraft:oak_sapling", 16)
+	ccFuel.refuelFromInventory(10000)
+	H.eq(turtle.getItemCount(2), 0, "comportement d'origine conservé")
+end)
+
+H.case("refuelFromChest rend ce que le filtre refuse, dans l'ordre", function()
+	fresh({ fuel = 0 })
+	chestBelow({
+		[1] = { name = "minecraft:oak_sapling", count = 16 },
+		[2] = { name = "minecraft:coal", count = 4 },
+	})
+
+	H.ok(ccFuel.refuelFromChest("down", 200, { accept = notSapling }), "ravitaillement")
+
+	local chest = mock.getBlock(0, 0, -1).inventory
+	H.eq(chest[1].name, "minecraft:oak_sapling", "saplings rendus en tête")
+	H.eq(chest[1].count, 16, "et en entier")
+end)

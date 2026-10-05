@@ -575,3 +575,71 @@ H.case("la poudre d'os restante reste à bord", function()
 	end
 	H.eq(reste, 7, "sept poudres d'os restantes")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Constaté en jeu : carburant bas, saplings brûlés, attente qui tourne en rond
+-- ---------------------------------------------------------------------------
+
+H.case("RÉGRESSION : le ravitaillement ne brûle pas les saplings", function()
+	-- Carburant sous la réserve : l'abattage est différé, la turtle rentre se
+	-- ravitailler. ccFuel brûlait alors tout ce qui est combustible pour viser
+	-- fuelTopUp -- saplings compris, puisqu'un sapling brûle.
+	terrain({ fuel = 50, chestContents = { [1] = { name = "minecraft:coal", count = 32 } } })
+
+	run("1")
+
+	H.eq(treeBlocks(), 0, "l'arbre est abattu une fois ravitaillée")
+	H.eq(turtle.getItemCount(2), 7, "huit saplings, un replanté, aucun brûlé")
+end)
+
+H.case("RÉGRESSION : un arbre adulte devant n'exige pas de sapling", function()
+	-- La turtle refusait de repartir faute de sapling, alors que la case de
+	-- plantation portait un arbre prêt à être abattu.
+	terrain({ fuel = 50, saplings = 0,
+	          chestContents = { [1] = { name = "minecraft:coal", count = 32 } } })
+	mock.setEventBudget(60)
+
+	run("1")     -- finit en attente : plus rien à replanter ensuite
+
+	H.eq(treeBlocks(), 0, "l'arbre est abattu malgré l'absence de sapling")
+end)
+
+H.case("RÉGRESSION : une attente qui dure espace ses services", function()
+	-- Chaque réveil relançait un service complet toutes les 5 s, coffre
+	-- cherché et turtle retournée compris : vue de dehors, elle tournait sur
+	-- elle-même sans fin.
+	terrain({ noTree = true, saplings = 0 })
+	mock.setEventBudget(30)
+
+	run("1")
+
+	local times = {}
+	for t in (mock.getFile("ccchop.log") or ""):gmatch("%[([%d%.]+)%] SERVICE | SERVICE") do
+		times[#times + 1] = tonumber(t)
+	end
+	H.ok(#times >= 4, "plusieurs services : " .. #times)
+	for i = 3, #times do
+		H.ok(times[i] - times[i - 1] >= times[i - 1] - times[i - 2],
+			"écart croissant entre les services " .. (i - 1) .. " et " .. i)
+	end
+	H.ok(times[#times] - times[#times - 1] >= 40, "jusqu'à près d'une minute")
+end)
+
+H.case("à court de charbon, les bûches servent de carburant, jamais les saplings", function()
+	terrain({ fuel = 50, chestContents = { [1] = { name = LOG, count = 32 } } })
+	mock.setSlot(1, nil)     -- pas de charbon à bord
+
+	run("1")
+
+	H.eq(treeBlocks(), 0, "l'arbre est abattu grâce aux bûches")
+	local saplings = 0
+	for slot = 1, 16 do
+		local d = turtle.getItemDetail(slot)
+		if d and d.name == SAPLING then saplings = saplings + d.count end
+	end
+	H.eq(saplings, 7, "aucun sapling brûlé")
+	-- Le bois n'est brûlé que jusqu'au plancher, pas jusqu'à fuelTopUp :
+	-- c'est la récolte. Viser 2000 aurait englouti tout le coffre.
+	H.ok((chestSummary()[LOG] or 0) >= 15, "la récolte reste au coffre : "
+		.. tostring(chestSummary()[LOG]))
+end)
