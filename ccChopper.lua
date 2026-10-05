@@ -105,7 +105,9 @@ local CONFIG_PATH = "ccchopper.cfg"
 
 local DEFAULTS = {
 	makeCharcoal = false,     -- alimenter un four avec une partie des bûches
-	chopLeaves = true,        -- casser aussi les feuilles, pour les saplings
+	leafBridge = 1,           -- feuilles traversées d'affilée pour rejoindre
+	                          -- une bûche en diagonale
+	saplingReserve = 4,       -- en dessous, la canopée entière est rasée
 	fertilize = true,         -- utiliser la poudre d'os sur les jeunes pousses
 
 	growWait = 20,            -- secondes entre deux inspections d'une pousse
@@ -159,10 +161,22 @@ return {
     -- CONTENEUR qui l'alimente, la turtle ne fait que commander le transfert.
     makeCharcoal = false,
 
-    -- Casser aussi les feuilles. C'est ce qui rapporte les saplings, donc la
-    -- ferme s'auto-alimente ; en contrepartie l'abattage est bien plus long.
-    -- A false, la turtle ne suit que le bois.
-    chopLeaves = true,
+    -- Feuilles traversees d'affilee pour rejoindre une buche qui ne touche
+    -- pas les autres. La turtle ne casse une feuille que pour passer, jamais
+    -- pour elle-meme : le reste de la canopee pourrit seul, une fois le tronc
+    -- abattu.
+    --   0 : le bois seulement, aucune feuille cassee.
+    --   1 : une buche en diagonale dans un plan est rejointe. Defaut.
+    --   2 : aussi une diagonale dans les trois axes ; sur un chene, cela
+    --       revient presque a raser la canopee.
+    leafBridge = 1,
+
+    -- Stock de saplings a bord, apres le service, en dessous duquel la
+    -- canopee entiere est rasee. Casser une feuille ne rapporte pas plus de
+    -- saplings que la laisser pourrir -- environ 1 sur 20 -- mais les met
+    -- directement en inventaire. Un chene en rend environ 3 : le stock se
+    -- reconstitue et ne tombe jamais a zero.
+    saplingReserve = 4,
 
     -- Utiliser la poudre d'os sur les jeunes pousses, si la turtle en a.
     fertilize = true,
@@ -369,9 +383,10 @@ local function isWood(name) return matchesAny(name, CONFIG.woodPatterns) end
 local function isLeaves(name) return matchesAny(name, CONFIG.leafPatterns) end
 local function isSapling(name) return matchesAny(name, CONFIG.saplingPatterns) end
 
---- Ce bloc fait-il partie de l'arbre, donc à casser ?
+--- Ce bloc fait-il partie de l'arbre ? Ce qui en fait partie PEUT être cassé ;
+--- c'est l'abattage qui décide si une feuille DOIT l'être.
 local function isTree(name)
-	return isWood(name) or (CONFIG.chopLeaves and isLeaves(name))
+	return isWood(name) or isLeaves(name)
 end
 
 local INSPECTS = { forward = "inspect", up = "inspectUp", down = "inspectDown" }
@@ -568,7 +583,13 @@ end
 -- Chaque descente revient sur sa case d'appel avant de rendre la main : la
 -- pile d'appels Lua EST le chemin de retour. En sortie, la turtle est donc
 -- revenue exactement là où elle est entrée, cap compris.
-local function chopHere(depth)
+--
+-- `leafRun` compte les feuilles traversées depuis la dernière bûche. Une
+-- feuille n'est cassée que pour PASSER, à leafBridge cases au plus de la
+-- dernière bûche : le coût suit le tronc et les branches, plus le volume de la
+-- canopée. Raser la canopée entière -- ctx.shave -- ne sert qu'à refaire le
+-- stock de saplings.
+local function chopHere(depth, leafRun)
 	if depth > CONFIG.maxDepth then return end
 
 	--- Casse la case voisine, y entre, poursuit, puis revient ici.
@@ -582,7 +603,15 @@ local function chopHere(depth)
 	local function into(where)
 		if chopStop() then return false end
 		local name = blockAt(where)
-		if not isTree(name) then return true end
+
+		local run
+		if isWood(name) then
+			run = 0
+		elseif isLeaves(name) and (ctx.shave or leafRun < CONFIG.leafBridge) then
+			run = leafRun + 1
+		else
+			return true
+		end
 		if not clearTree(where) then return true end
 
 		local from = ccNav.position()
@@ -590,7 +619,7 @@ local function chopHere(depth)
 		-- au-delà. Si le mouvement échoue, rien n'est perdu, on passe au
 		-- voisin suivant.
 		if not MOVES[where]({ dig = false }) then return true end
-		chopHere(depth + 1)
+		chopHere(depth + 1, run)
 		return stepBackTo(from)
 	end
 
@@ -822,6 +851,16 @@ local function fuelSlotForTidy()
 	return best
 end
 
+--- Nombre de saplings à bord.
+local function saplingCount()
+	local n = 0
+	for slot = 1, 16 do
+		local d = ccInv.detail(slot)
+		if d and isSapling(d.name) then n = n + d.count end
+	end
+	return n
+end
+
 --- Slot contenant un sapling, ou nil.
 local function findSapling()
 	for slot = 1, 16 do
@@ -1000,6 +1039,10 @@ STATES[S.CHOP] = function()
 		return S.RETURN
 	end
 
+	-- Stock de saplings bas : on rase la canopée de cet arbre-là pour le
+	-- refaire. Sinon on la laisse pourrir, ce qui divise le temps d'abattage.
+	ctx.shave = saplingCount() < CONFIG.saplingReserve
+
 	local base = ccNav.position()
 
 	if not clearTree("forward") then
@@ -1011,13 +1054,14 @@ STATES[S.CHOP] = function()
 		return S.RETURN
 	end
 
-	chopHere(1)
+	chopHere(1, 0)
 	stepBackTo(base)
 
 	local stop = chopStop()
 	ctx.trees = ctx.trees + 1
-	journal(("Arbre abattu : %d blocs%s")
-		:format(ctx.logs, stop and (", interrompu (" .. stop .. ")") or ""))
+	journal(("Arbre abattu : %d blocs%s%s")
+		:format(ctx.logs, ctx.shave and ", canopee rasee" or "",
+		        stop and (", interrompu (" .. stop .. ")") or ""))
 
 	ctx.reason = stop or "arbre"
 	return S.RETURN
@@ -1307,8 +1351,8 @@ ctx.drawTimer = os.startTimer(0.5)
 
 if configCreated then journal("Options creees : " .. CONFIG_PATH) end
 for _, w in ipairs(configWarnings) do journal("Options : " .. w) end
-journal(("Feuilles : %s, charbon : %s")
-	:format(CONFIG.chopLeaves and "coupees" or "epargnees",
+journal(("Feuilles : passage %d, rasage sous %d saplings, charbon : %s")
+	:format(CONFIG.leafBridge, CONFIG.saplingReserve,
 	        CONFIG.makeCharcoal and "oui" or "non"))
 
 save()

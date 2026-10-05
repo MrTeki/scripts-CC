@@ -79,19 +79,24 @@ local function chestSummary(x, y, z)
 	return out
 end
 
---- Blocs de l'arbre encore debout.
-local function treeBlocks()
+--- Blocs d'un type donné encore debout autour de l'arbre.
+local function countAround(name)
 	local n = 0
 	for x = 0, 3 do
 		for y = -1, 1 do
 			for z = 0, 6 do
 				local b = mock.getBlock(x, y, z)
-				if b and (b.name == LOG or b.name == LEAVES) then n = n + 1 end
+				if b and b.name == name then n = n + 1 end
 			end
 		end
 	end
 	return n
 end
+
+--- Bûches encore debout. Les feuilles ne comptent pas : loin du bois, elles
+--- sont désormais laissées à pourrir.
+local function treeBlocks() return countAround(LOG) end
+local function leavesLeft() return countAround(LEAVES) end
 
 -- ---------------------------------------------------------------------------
 -- Arguments
@@ -116,7 +121,7 @@ H.case("config crée le fichier d'options sans rien abattre", function()
 	local sorties = run("config")
 	H.contains(table.concat(sorties, "\n"), "ccchopper.cfg", "message")
 	H.ok(fs.exists("ccchopper.cfg"), "fichier d'options créé")
-	H.eq(treeBlocks(), 10, "l'arbre est intact")
+	H.eq(treeBlocks(), 4, "l'arbre est intact")
 end)
 
 H.case("l'amorce ne touche pas au réseau quand les APIs sont là", function()
@@ -137,7 +142,7 @@ H.case("update consulte le manifeste et n'installe que ce qui est en retard", fu
 	local sorties = run("update")
 	H.eq(#mock.httpRequests(), 1, "seul le manifeste est téléchargé")
 	H.contains(table.concat(sorties, "\n"), "a jour", "message")
-	H.eq(treeBlocks(), 10, "aucun abattage")
+	H.eq(treeBlocks(), 4, "aucun abattage")
 end)
 
 -- ---------------------------------------------------------------------------
@@ -189,23 +194,52 @@ H.case("RÉGRESSION : rien d'autre que l'arbre n'est cassé", function()
 	H.eq(treeBlocks(), 0, "l'arbre est abattu malgré tout")
 end)
 
-H.case("les feuilles sont épargnées quand chopLeaves est faux", function()
-	terrain()
-	mock.putFile("ccchopper.cfg", "return { chopLeaves = false }")
+H.case("stock de saplings suffisant : seules les feuilles de passage sont cassées", function()
+	-- (2,0,4) ne touche aucune bûche : avec leafBridge = 1, elle reste à
+	-- pourrir. Les cinq feuilles au contact du tronc sont cassées au passage.
+	terrain()     -- 8 saplings, au-dessus de saplingReserve
 	run("1")
 
-	local restant = treeBlocks()
-	H.ok(restant > 0, "des feuilles restent : " .. restant)
-	-- z = 0 porte le sapling replanté, d'où le départ à 1.
-	for z = 1, 3 do
-		H.isNil(mock.getBlock(1, 0, z), "bûche z=" .. z .. " coupée")
-	end
-	H.eq(mock.getBlock(1, 0, 0).name, SAPLING, "et la case du tronc est replantée")
+	H.eq(treeBlocks(), 0, "le bois est abattu")
+	H.eq(leavesLeft(), 1, "la feuille éloignée reste")
+	H.ok(mock.getBlock(2, 0, 4) ~= nil, "c'est bien elle")
 end)
 
--- ---------------------------------------------------------------------------
--- Interruptions : les trois boucles infinies de l'ancienne version
--- ---------------------------------------------------------------------------
+H.case("stock de saplings bas : la canopée entière est rasée", function()
+	-- Casser une feuille ne rapporte pas plus de saplings que la laisser
+	-- pourrir, mais les met en inventaire : c'est ce qui refait le stock.
+	terrain({ saplings = 2 })
+	run("1")
+
+	H.eq(treeBlocks(), 0, "le bois est abattu")
+	H.eq(leavesLeft(), 0, "plus une feuille")
+	H.contains(mock.getFile("ccchop.log") or "", "canopee rasee", "le journal le dit")
+end)
+
+H.case("une bûche en diagonale est rejointe à travers une feuille", function()
+	-- Une bûche qui ne touche le tronc que par une arête : c'est la garantie
+	-- pour laquelle les feuilles étaient cassées jusqu'ici.
+	terrain()
+	mock.setBlock(1, 1, 2, LEAVES)
+	mock.setBlock(2, 1, 2, LOG)
+	-- Et une seconde, en diagonale de la première : le compteur de feuilles
+	-- doit repartir de zéro sur chaque bûche, sinon la branche s'arrête là.
+	mock.setBlock(2, 2, 2, LEAVES)
+	mock.setBlock(3, 2, 2, LOG)
+	run("1")
+
+	H.isNil(mock.getBlock(2, 1, 2), "la bûche en diagonale est abattue")
+	H.isNil(mock.getBlock(3, 2, 2), "la suivante aussi")
+end)
+
+H.case("leafBridge = 0 : aucune feuille cassée", function()
+	terrain()
+	mock.putFile("ccchopper.cfg", "return { leafBridge = 0 }")
+	run("1")
+
+	H.eq(treeBlocks(), 0, "le bois est abattu")
+	H.eq(leavesLeft(), 6, "toutes les feuilles restent")
+end)
 
 H.case("RÉGRESSION : inventaire plein, la turtle vide avant d'abattre", function()
 	-- turtle.dig() réussit MÊME quand l'inventaire est plein : l'objet est
