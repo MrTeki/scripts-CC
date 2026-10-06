@@ -185,16 +185,15 @@ Ce qui n'a jamais tourné en conditions réelles, et qu'un essai devrait couvrir
   une pile de charbon dans le conteneur, et un chantier profond.
 - **Le ravitaillement au conteneur fixe**, ajouté en même temps.
 - **Le mode `dropWhenNoChest = true`**, jamais exercé en jeu.
-- **`ccChopper` en entier.** Il passe 30 cas sous le mock, dont l'abattage
-  complet, le retour, le four et la reprise, mais n'a jamais tourné en jeu
-  depuis la migration. À surveiller en priorité : la reconnaissance du four par
-  `peripheral.getNames()`, et `chest.pushItems(<côté du four>, slot, n, 1)` —
-  c'est-à-dire qu'un conteneur accepte bien un nom de côté relatif au turtle
-  pour désigner sa cible.
-
 Confirmé depuis la rédaction de cette liste :
 
 - `turtle.refuel(0)` répond sans consommer.
 - `peripheral` voit bien les blocs voisins d'un turtle sur CC:Tweaked récent.
 - La reprise après un vrai rechargement de partie -- elle a d'ailleurs révélé
   que les rotations n'étaient pas sauvegardées.
+- `ccChopper` en ferme continue : cinq arbres d'affilée, dont deux grands
+  chênes abattus sans laisser une bûche, replantage et four compris.
+- `peripheral.getNames()` sur un turtle liste aussi un four voisin, et
+  `chest.pushItems(<côté du four>, slot, n, 1)` accepte un nom de côté relatif
+  au turtle pour désigner la cible : un conteneur peut alimenter un four, slot
+  par slot, sans modem.
