@@ -194,15 +194,16 @@ H.case("RÉGRESSION : rien d'autre que l'arbre n'est cassé", function()
 	H.eq(treeBlocks(), 0, "l'arbre est abattu malgré tout")
 end)
 
-H.case("stock de saplings suffisant : seules les feuilles de passage sont cassées", function()
-	-- (2,0,4) ne touche aucune bûche : avec leafBridge = 1, elle reste à
-	-- pourrir. Les cinq feuilles au contact du tronc sont cassées au passage.
+H.case("stock de saplings suffisant : la canopée n'est pas rasée", function()
+	-- Les feuilles ne sont cassées que pour servir de poste d'observation,
+	-- quand aucune case libre ne permet de voir une diagonale. (2,0,4) n'est
+	-- jamais un poste : elle reste à pourrir.
 	terrain()     -- 8 saplings, au-dessus de saplingReserve
 	run("1")
 
 	H.eq(treeBlocks(), 0, "le bois est abattu")
-	H.eq(leavesLeft(), 1, "la feuille éloignée reste")
-	H.ok(mock.getBlock(2, 0, 4) ~= nil, "c'est bien elle")
+	H.ok(leavesLeft() > 0, "des feuilles restent")
+	H.ok(mock.getBlock(2, 0, 4) ~= nil, "dont la plus éloignée")
 end)
 
 H.case("stock de saplings bas : la canopée entière est rasée", function()
@@ -216,29 +217,72 @@ H.case("stock de saplings bas : la canopée entière est rasée", function()
 	H.contains(mock.getFile("ccchop.log") or "", "canopee rasee", "le journal le dit")
 end)
 
-H.case("une bûche en diagonale est rejointe à travers une feuille", function()
-	-- Une bûche qui ne touche le tronc que par une arête : c'est la garantie
-	-- pour laquelle les feuilles étaient cassées jusqu'ici.
-	terrain()
-	mock.setBlock(1, 1, 2, LEAVES)
-	mock.setBlock(2, 1, 2, LOG)
-	-- Et une seconde, en diagonale de la première : le compteur de feuilles
-	-- doit repartir de zéro sur chaque bûche, sinon la branche s'arrête là.
-	mock.setBlock(2, 2, 2, LEAVES)
-	mock.setBlock(3, 2, 2, LOG)
+--- Colonne de `n` bûches sur la case de plantation, sans feuilles.
+local function column(n)
+	for z = 0, n - 1 do mock.setBlock(1, 0, z, LOG) end
+end
+
+H.case("RÉGRESSION : une branche en diagonale stricte, séparée par de l'air, est suivie", function()
+	-- Constaté en jeu sur un grand chêne : des bûches en diagonale stricte du
+	-- tronc restaient debout. Le générateur (FancyTrunkPlacer) trace les
+	-- branches comme des droites discrétisées, sans feuilles près du tronc :
+	-- la case entre deux bûches en diagonale est de l'AIR.
+	terrain({ noTree = true })
+	column(8)
+	mock.setBlock(2, 1, 3, LOG)     -- diagonale horizontale de la 4e bûche
+	mock.setBlock(3, 2, 4, LOG)     -- coin de la précédente
+	mock.setBlock(4, 3, 4, LOG)     -- diagonale horizontale de la précédente
 	run("1")
 
-	H.isNil(mock.getBlock(2, 1, 2), "la bûche en diagonale est abattue")
-	H.isNil(mock.getBlock(3, 2, 2), "la suivante aussi")
+	H.isNil(mock.getBlock(2, 1, 3), "première bûche de branche")
+	H.isNil(mock.getBlock(3, 2, 4), "bûche en coin")
+	H.isNil(mock.getBlock(4, 3, 4), "bout de branche")
 end)
 
-H.case("leafBridge = 0 : aucune feuille cassée", function()
-	terrain()
-	mock.putFile("ccchopper.cfg", "return { leafBridge = 0 }")
+H.case("une branche peut partir de la 3e bûche d'un tronc court", function()
+	-- Une branche part à au moins 20 % de la hauteur de l'arbre : pour un
+	-- grand chêne dont la colonne fait 5 bûches, c'est la 3e. Sonder seulement
+	-- les deux du haut l'aurait manquée.
+	terrain({ noTree = true })
+	column(5)
+	mock.setBlock(2, -1, 2, LOG)
 	run("1")
 
-	H.eq(treeBlocks(), 0, "le bois est abattu")
-	H.eq(leavesLeft(), 6, "toutes les feuilles restent")
+	H.isNil(mock.getBlock(2, -1, 2), "la branche basse est abattue")
+end)
+
+H.case("un coin au-dessus du sommet est vu", function()
+	-- Rien ne sonde au-dessus du sommet : c'est lui qui doit le faire.
+	terrain({ noTree = true })
+	column(4)
+	mock.setBlock(0, 1, 4, LOG)
+	run("1")
+
+	H.isNil(mock.getBlock(0, 1, 4), "la bûche en coin du sommet est abattue")
+end)
+
+H.case("les deux premières bûches ne sont pas sondées", function()
+	-- Aucune branche ne part si bas : y sonder coûterait sans rien trouver.
+	-- Une bûche posée là à la main reste donc, et c'est voulu.
+	terrain({ noTree = true })
+	column(5)
+	mock.setBlock(2, 1, 1, LOG)
+	run("1")
+
+	H.ok(mock.getBlock(2, 1, 1) ~= nil, "la diagonale de la 2e bûche n'est pas sondée")
+	H.isNil(mock.getBlock(1, 0, 4), "mais le tronc est abattu")
+end)
+
+H.case("un poste occupé par autre chose que l'arbre n'est pas cassé", function()
+	-- La diagonale se voit alors depuis une autre face.
+	terrain({ noTree = true })
+	column(5)
+	mock.setBlock(0, 0, 2, "minecraft:stone")     -- face -X de la 3e bûche
+	mock.setBlock(0, 1, 2, LOG)                   -- diagonale de ce côté
+	run("1")
+
+	H.eq(mock.getBlock(0, 0, 2).name, "minecraft:stone", "la pierre est intacte")
+	H.isNil(mock.getBlock(0, 1, 2), "la diagonale est vue depuis la face +Y")
 end)
 
 H.case("RÉGRESSION : inventaire plein, la turtle vide avant d'abattre", function()

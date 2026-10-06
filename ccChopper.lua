@@ -105,8 +105,6 @@ local CONFIG_PATH = "ccchopper.cfg"
 
 local DEFAULTS = {
 	makeCharcoal = false,     -- alimenter un four avec une partie des bûches
-	leafBridge = 1,           -- feuilles traversées d'affilée pour rejoindre
-	                          -- une bûche en diagonale
 	saplingReserve = 4,       -- en dessous, la canopée entière est rasée
 	fertilize = true,         -- utiliser la poudre d'os sur les jeunes pousses
 
@@ -160,16 +158,6 @@ return {
     -- etre contre la turtle, sur un autre cote que le conteneur : c'est le
     -- CONTENEUR qui l'alimente, la turtle ne fait que commander le transfert.
     makeCharcoal = false,
-
-    -- Feuilles traversees d'affilee pour rejoindre une buche qui ne touche
-    -- pas les autres. La turtle ne casse une feuille que pour passer, jamais
-    -- pour elle-meme : le reste de la canopee pourrit seul, une fois le tronc
-    -- abattu.
-    --   0 : le bois seulement, aucune feuille cassee.
-    --   1 : une buche en diagonale dans un plan est rejointe. Defaut.
-    --   2 : aussi une diagonale dans les trois axes ; sur un chene, cela
-    --       revient presque a raser la canopee.
-    leafBridge = 1,
 
     -- Stock de saplings a bord, apres le service, en dessous duquel la
     -- canopee entiere est rasee. Casser une feuille ne rapporte pas plus de
@@ -477,6 +465,43 @@ local function applyCommands()
 end
 
 -- ---------------------------------------------------------------------------
+-- Carte des cases examinées
+-- ---------------------------------------------------------------------------
+-- Remise à zéro à chaque arbre. Les diagonales de deux bûches voisines se
+-- recouvrent largement : une case déjà vue n'est pas réinspectée.
+--
+--   ctx.seen[c]    = nom du bloc, ou false pour de l'air (état COURANT)
+--   ctx.wasWood[c] = true si la case portait du bois quand on l'a vue
+
+local function cellKey(c) return c.x .. "," .. c.y .. "," .. c.z end
+
+--- Case visée par une direction, depuis la position courante.
+local function cellAt(where)
+	local p = ccNav.position()
+	if where == "up" then return { x = p.x, y = p.y, z = p.z + 1 } end
+	if where == "down" then return { x = p.x, y = p.y, z = p.z - 1 } end
+	local dx, dy = ccVec.delta(p.dir)
+	return { x = p.x + dx, y = p.y + dy, z = p.z }
+end
+
+--- Inspecte et retient.
+local function look(where)
+	local name = blockAt(where)
+	if ctx.seen then
+		local k = cellKey(cellAt(where))
+		ctx.seen[k] = name or false
+		if isWood(name) then ctx.wasWood[k] = true end
+	end
+	return name
+end
+
+local function distance(a, b)
+	return math.abs(a.x - b.x) + math.abs(a.y - b.y) + math.abs(a.z - b.z)
+end
+
+local function adjacent(a, b) return distance(a, b) == 1 end
+
+-- ---------------------------------------------------------------------------
 -- Mouvement filtré
 -- ---------------------------------------------------------------------------
 -- Toutes les primitives de déplacement passent par ici avec `dig = false`, et
@@ -495,7 +520,9 @@ local function clearTree(where)
 		if not ccNav.dig(where, { maxDig = 1 }) then return false end
 		ctx.logs = ctx.logs + 1
 	end
-	return blockAt(where) == nil
+	if blockAt(where) ~= nil then return false end
+	if ctx.seen then ctx.seen[cellKey(cellAt(where))] = false end
+	return true
 end
 
 local MOVES = { forward = ccNav.forward, up = ccNav.up, down = ccNav.down }
@@ -578,61 +605,221 @@ local function chopStop()
 	return nil
 end
 
+--- S'oriente vers la case adjacente `c`.
+-- @return la direction à utiliser : "forward", "up" ou "down"
+local function aim(c)
+	local p = ccNav.position()
+	if c.z > p.z then return "up" end
+	if c.z < p.z then return "down" end
+	ccNav.turnTo(headingTo(p, c))
+	return "forward"
+end
+
+-- ---------------------------------------------------------------------------
+-- Abattage
+-- ---------------------------------------------------------------------------
+-- Tracé déduit du générateur du jeu (FancyTrunkPlacer, Minecraft 1.21.1) :
+--
+--   * le tronc est une colonne droite ;
+--   * chaque branche part DE L'INTÉRIEUR de cette colonne, à au moins 20 % de
+--     la hauteur de l'arbre (trimBranches), et monte en ligne droite vers une
+--     boule de feuillage ;
+--   * une branche est une droite discrétisée : à chaque pas l'axe principal
+--     avance de 1 et chacun des deux autres de 0 ou 1. Deux bûches
+--     consécutives peuvent donc ne se toucher que par une arête, voire par un
+--     coin ;
+--   * les feuilles ne sont qu'au BOUT des branches : près du tronc, la case
+--     entre deux bûches en diagonale est de l'air.
+--
+-- D'où le tracé : explorer les six faces de chaque bûche, puis sonder ses
+-- diagonales en se postant dans les cases libres voisines -- sans rien
+-- casser, sauf une feuille quand aucune case libre ne permet de voir.
+-- Sonder à travers les feuilles seules ne suffisait pas : c'est l'air qui
+-- sépare les bûches en diagonale.
+
+local chopHere
+
+--- Entre dans la case adjacente indiquée, l'abat, puis revient.
+local function enter(where, depth, isLog)
+	if not clearTree(where) then return true end
+	local from = ccNav.position()
+	if not MOVES[where]({ dig = false }) then return true end
+	chopHere(depth + 1, isLog)
+	return stepBackTo(from)
+end
+
+--- Inspecte, depuis la position courante, toutes les cibles encore inconnues
+--- qui lui sont adjacentes, et abat le bois trouvé.
+-- @return false s'il faut interrompre l'abattage
+local function inspectAround(targets, depth)
+	for _, t in ipairs(targets) do
+		if ctx.seen[cellKey(t)] == nil and adjacent(t, ccNav.position()) then
+			if chopStop() then return false end
+			local where = aim(t)
+			if isWood(look(where)) then
+				if not enter(where, depth, true) then return false end
+			end
+		end
+	end
+	return true
+end
+
+--- Diagonales à examiner autour de la bûche courante.
+--
+-- Colonne du tronc : rien sous la 3e bûche. Une branche part à au moins 20 %
+-- de la hauteur de l'arbre, ce qui pour le plus petit grand chêne qui en porte
+-- donne déjà la 3e bûche ; les deux premières n'en portent jamais. Au-dessus,
+-- seules les 4 diagonales HORIZONTALES : les diagonales verticales et les coins
+-- d'une bûche de la colonne sont les diagonales horizontales de ses voisines
+-- du dessus et du dessous, qui les sondent elles-mêmes. Le sommet fait
+-- exception : rien ne sonde au-dessus de lui.
+--
+-- Branche : une branche s'éloigne de la colonne et ne descend jamais. Sur
+-- chaque axe horizontal, le pas suivant est donc 0 ou le signe déjà pris -- les
+-- deux sens tant que la branche ne s'est pas encore écartée sur cet axe -- et
+-- sur la verticale, 0 ou +1.
+local function diagonalTargets()
+	local p = ccNav.position()
+	local out = {}
+	local function add(dx, dy, dz)
+		local axes = (dx ~= 0 and 1 or 0) + (dy ~= 0 and 1 or 0) + (dz ~= 0 and 1 or 0)
+		if axes >= 2 then out[#out + 1] = { x = p.x + dx, y = p.y + dy, z = p.z + dz } end
+	end
+
+	if p.x == TREE.x and p.y == TREE.y then
+		if p.z - TREE.z < 2 then return out end
+		for _, dx in ipairs({ -1, 1 }) do
+			for _, dy in ipairs({ -1, 1 }) do add(dx, dy, 0) end
+		end
+		if not ctx.wasWood[cellKey({ x = p.x, y = p.y, z = p.z + 1 })] then
+			for dx = -1, 1 do
+				for dy = -1, 1 do add(dx, dy, 1) end
+			end
+		end
+		return out
+	end
+
+	local function steps(v, axis)
+		if v > axis then return { 0, 1 } end
+		if v < axis then return { -1, 0 } end
+		return { -1, 0, 1 }
+	end
+	for _, dx in ipairs(steps(p.x, TREE.x)) do
+		for _, dy in ipairs(steps(p.y, TREE.y)) do
+			add(dx, dy, 0)
+			add(dx, dy, 1)
+		end
+	end
+	return out
+end
+
+-- Postes d'observation : les faces de la bûche, dans l'ordre qui minimise les
+-- visites pour les cas courants.
+local POSTS = {
+	{ 1, 0, 0 }, { -1, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, -1 },
+}
+
+--- Sonde les diagonales de la bûche courante, et abat le bois trouvé.
+--
+-- Une cible voisine d'une face est vue depuis cette face. Un coin est à deux
+-- pas : on le voit depuis une case libre voisine à la fois du poste et du coin
+-- -- un « saut ». Les postes libres passent d'abord ; une feuille n'est cassée
+-- pour servir de poste que s'il reste quelque chose à voir.
+-- @return false s'il faut interrompre l'abattage
+local function probe(targets, depth)
+	if #targets == 0 then return true end
+	-- Sans cap : le revenir sur la bûche suffit, l'appelant restaure le cap
+	-- dont il a besoin. Le restaurer ici coûtait deux rotations par poste.
+	local p = ccNav.position()
+	local home = { x = p.x, y = p.y, z = p.z }
+
+	local function unknownNear(near, maxDist)
+		for _, t in ipairs(targets) do
+			if ctx.seen[cellKey(t)] == nil and distance(t, near) <= maxDist then return true end
+		end
+		return false
+	end
+
+	--- Depuis le poste courant, saute vers une case libre voisine d'un coin
+	--- encore inconnu, l'inspecte, et revient.
+	local function hops()
+		local p = ccNav.position()
+		local at = { x = p.x, y = p.y, z = p.z }
+		for _, t in ipairs(targets) do
+			if ctx.seen[cellKey(t)] == nil and distance(t, at) == 2 then
+				for _, q in ipairs(targets) do
+					if ctx.seen[cellKey(q)] == false and adjacent(q, at) and adjacent(q, t) then
+						local ok = true
+						if MOVES[aim(q)]({ dig = false }) then
+							ok = inspectAround(targets, depth)
+							if not stepBackTo(at) then ok = false end
+						end
+						if not ok then return false end
+						break
+					end
+				end
+			end
+		end
+		return true
+	end
+
+	for pass = 1, 2 do
+		for _, o in ipairs(POSTS) do
+			if not unknownNear(home, 3) then return true end
+			if chopStop() then return false end
+
+			local post = { x = home.x + o[1], y = home.y + o[2], z = home.z + o[3] }
+			local state = ctx.seen[cellKey(post)]
+			local usable = state == false or (pass == 2 and state and isLeaves(state))
+
+			if usable and unknownNear(post, 2) then
+				local where = aim(post)
+				if clearTree(where) and MOVES[where]({ dig = false }) then
+					local ok = inspectAround(targets, depth) and hops()
+					if not stepBackTo(home) or not ok then return false end
+				end
+			end
+		end
+	end
+	return true
+end
+
 --- Abat l'arbre à partir de la case courante, qui vient d'être vidée.
 --
 -- Chaque descente revient sur sa case d'appel avant de rendre la main : la
 -- pile d'appels Lua EST le chemin de retour. En sortie, la turtle est donc
 -- revenue exactement là où elle est entrée, cap compris.
 --
--- `leafRun` compte les feuilles traversées depuis la dernière bûche. Une
--- feuille n'est cassée que pour PASSER, à leafBridge cases au plus de la
--- dernière bûche : le coût suit le tronc et les branches, plus le volume de la
--- canopée. Raser la canopée entière -- ctx.shave -- ne sert qu'à refaire le
--- stock de saplings.
-local function chopHere(depth, leafRun)
+-- Les feuilles ne sont suivies qu'en mode rasage (ctx.shave), pour refaire le
+-- stock de saplings ; sinon elles pourrissent seules une fois le bois abattu.
+chopHere = function(depth, isLog)
 	if depth > CONFIG.maxDepth then return end
 
-	--- Casse la case voisine, y entre, poursuit, puis revient ici.
-	--
 	-- La position de retour est relevée à CHAQUE descente, et non une fois pour
 	-- toutes à l'entrée de la fonction : l'exploration des quatre côtés fait
-	-- tourner la turtle, donc le cap à restaurer n'est pas le même d'un côté à
-	-- l'autre. Le relever une seule fois remettait le cap du premier côté et
-	-- faisait sauter les suivants.
+	-- tourner la turtle, donc le cap à restaurer change d'un côté à l'autre.
 	-- @return false s'il faut interrompre l'abattage
 	local function into(where)
 		if chopStop() then return false end
-		local name = blockAt(where)
-
-		local run
-		if isWood(name) then
-			run = 0
-		elseif isLeaves(name) and (ctx.shave or leafRun < CONFIG.leafBridge) then
-			run = leafRun + 1
-		else
-			return true
-		end
-		if not clearTree(where) then return true end
-
-		local from = ccNav.position()
-		-- La case est vide : on n'y entre que pour suivre ce qu'il y a
-		-- au-delà. Si le mouvement échoue, rien n'est perdu, on passe au
-		-- voisin suivant.
-		if not MOVES[where]({ dig = false }) then return true end
-		chopHere(depth + 1, run)
-		return stepBackTo(from)
+		local name = look(where)
+		local log = isWood(name)
+		if not log and not (ctx.shave and isLeaves(name)) then return true end
+		return enter(where, depth, log)
 	end
 
 	if not into("up") then return end
 	if not into("down") then return end
 
-	-- Les quatre côtés. Le cap revient de lui-même à son point de départ à la
-	-- fin de la boucle, mais stepBackTo ne s'y fie pas.
-	for _ = 1, 4 do
+	-- Les quatre côtés : trois rotations suffisent. La quatrième ne ferait
+	-- que ramener le cap de départ, ce que stepBackTo fait de toute façon en
+	-- rendant la main à l'appelant.
+	for side = 1, 4 do
 		if not into("forward") then return end
 		if chopStop() then return end
-		ccNav.turnRight()
+		if side < 4 then ccNav.turnRight() end
 	end
+
+	if isLog then probe(diagonalTargets(), depth) end
 end
 
 --- Ramasse ce qui traîne autour, sans vider un conteneur voisin.
@@ -1042,6 +1229,7 @@ STATES[S.CHOP] = function()
 	-- Stock de saplings bas : on rase la canopée de cet arbre-là pour le
 	-- refaire. Sinon on la laisse pourrir, ce qui divise le temps d'abattage.
 	ctx.shave = saplingCount() < CONFIG.saplingReserve
+	ctx.seen, ctx.wasWood = {}, {}
 
 	local base = ccNav.position()
 
@@ -1054,8 +1242,9 @@ STATES[S.CHOP] = function()
 		return S.RETURN
 	end
 
-	chopHere(1, 0)
+	chopHere(1, true)
 	stepBackTo(base)
+	ctx.seen, ctx.wasWood = nil, nil
 
 	local stop = chopStop()
 	ctx.trees = ctx.trees + 1
@@ -1351,8 +1540,8 @@ ctx.drawTimer = os.startTimer(0.5)
 
 if configCreated then journal("Options creees : " .. CONFIG_PATH) end
 for _, w in ipairs(configWarnings) do journal("Options : " .. w) end
-journal(("Feuilles : passage %d, rasage sous %d saplings, charbon : %s")
-	:format(CONFIG.leafBridge, CONFIG.saplingReserve,
+journal(("Rasage sous %d saplings, charbon : %s")
+	:format(CONFIG.saplingReserve,
 	        CONFIG.makeCharcoal and "oui" or "non"))
 
 save()
