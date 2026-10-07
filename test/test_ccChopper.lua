@@ -411,12 +411,13 @@ local function terrainWithFurnace(o)
 	mock.putFile("ccchopper.cfg", "return { makeCharcoal = true }")
 end
 
-H.case("RÉGRESSION : le four reçoit les bûches en entrée et le charbon au foyer", function()
-	-- L'ancienne version appelait pushItems SANS slot de destination. La bûche
-	-- étant à la fois fondable et combustible, tout partait dans l'entrée : le
-	-- foyer restait vide, la boucle qui le surveillait ne s'arrêtait qu'une fois
-	-- le coffre vidé de ses bûches, et jamais si pushItems ne déplaçait plus rien.
-	terrainWithFurnace({ chestContents = { [1] = { name = "minecraft:charcoal", count = 8 } } })
+H.case("RÉGRESSION : le four reçoit des bûches en entrée et du charbon au foyer", function()
+	-- L'ancienne version appelait pushItems SANS slot de destination : la bûche
+	-- étant à la fois fondable et combustible, tout partait dans l'entrée.
+	terrainWithFurnace({ chestContents = {
+		[1] = { name = "minecraft:charcoal", count = 8 },
+		[2] = { name = LOG, count = 20 },
+	} })
 
 	run("1")
 
@@ -425,6 +426,92 @@ H.case("RÉGRESSION : le four reçoit les bûches en entrée et le charbon au fo
 	H.eq(slots[1].name, LOG, "l'entrée reçoit des bûches")
 	H.ok(slots[2] ~= nil, "le foyer est rempli")
 	H.eq(slots[2].name, "minecraft:charcoal", "le foyer reçoit du charbon")
+end)
+
+H.case("le four est chargé par lots exacts : 8 bûches par charbon", function()
+	-- Un charbon allumé brûle jusqu'au bout : allumé pour 3 bûches, il perd 5
+	-- cuissons sur 8. 24 bûches disponibles (20 + 4 de l'arbre) : 3 lots.
+	terrainWithFurnace({ chestContents = {
+		[1] = { name = "minecraft:charcoal", count = 8 },
+		[2] = { name = LOG, count = 20 },
+	} })
+
+	run("1")
+
+	H.eq(furnaceSlots()[1].count, 24, "24 bûches en entrée")
+	H.eq(furnaceSlots()[2].count, 3, "3 charbons au foyer, pas un de plus")
+end)
+
+H.case("le combustible disponible limite le nombre de lots", function()
+	-- Un seul charbon : un seul lot, même s'il y a 24 bûches. Les 16 autres
+	-- attendraient sinon dans l'entrée un combustible qui n'existe pas.
+	terrainWithFurnace({ chestContents = {
+		[1] = { name = "minecraft:charcoal", count = 1 },
+		[2] = { name = LOG, count = 20 },
+	} })
+
+	run("1")
+
+	H.eq(furnaceSlots()[1].count, 8, "8 bûches seulement")
+	H.eq(furnaceSlots()[2].count, 1, "pour le seul charbon")
+	H.eq(chestSummary()[LOG], 16, "le reste au coffre")
+end)
+
+H.case("moins d'un lot de bûches : rien n'est chargé", function()
+	terrainWithFurnace({ chestContents = { [1] = { name = "minecraft:charcoal", count = 8 } } })
+
+	run("1")     -- 4 bûches seulement
+
+	H.isNil(furnaceSlots()[1], "entrée vide")
+	H.isNil(furnaceSlots()[2], "aucun charbon engagé")
+	H.eq(chestSummary()[LOG], 4, "les bûches attendent au coffre")
+end)
+
+H.case("un lot en cours de cuisson n'est pas complété", function()
+	-- Le compléter ferait recouvrir deux lots, et le dernier charbon
+	-- s'allumerait pour un reste incomplet.
+	terrainWithFurnace({
+		chestContents = {
+			[1] = { name = "minecraft:charcoal", count = 8 },
+			[2] = { name = LOG, count = 20 },
+		},
+		furnaceContents = { [1] = { name = LOG, count = 5 } },
+	})
+
+	run("1")
+
+	H.eq(furnaceSlots()[1].count, 5, "l'entrée n'est pas touchée")
+	H.isNil(furnaceSlots()[2], "le foyer non plus")
+end)
+
+H.case("sans charbon, le four s'amorce au bois : 3 bûches pour 2", function()
+	-- Une bûche cuit 1,5 objet : 2 bûches au foyer cuisent exactement 3
+	-- bûches. 20 bûches (16 + 4) : 4 lots, soit 12 en entrée et 8 au foyer.
+	terrainWithFurnace({ chestContents = { [1] = { name = LOG, count = 16 } } })
+
+	run("1")
+
+	H.eq(furnaceSlots()[1].count, 12, "12 bûches en entrée")
+	H.eq(furnaceSlots()[2].name, LOG, "du bois au foyer")
+	H.eq(furnaceSlots()[2].count, 8, "8 bûches au foyer")
+end)
+
+H.case("du bois au foyer est repris dès que du charbon est disponible", function()
+	-- Le bois rend 0,6 charbon par bûche, le charbon 0,875 : on change de
+	-- combustible quand rien ne cuit.
+	terrainWithFurnace({
+		chestContents = {
+			[1] = { name = "minecraft:charcoal", count = 8 },
+			[2] = { name = LOG, count = 16 },
+		},
+		furnaceContents = { [2] = { name = LOG, count = 4 } },
+	})
+
+	run("1")
+
+	H.eq(furnaceSlots()[2].name, "minecraft:charcoal", "le foyer passe au charbon")
+	H.eq(furnaceSlots()[1].count, 24, "24 bûches : les 4 reprises comptent")
+	H.eq(furnaceSlots()[2].count, 3, "3 charbons")
 end)
 
 H.case("la sortie du four est vidée dans le conteneur", function()
@@ -443,12 +530,40 @@ H.case("la sortie du four est vidée dans le conteneur", function()
 end)
 
 H.case("le charbon produit réalimente le foyer", function()
-	terrainWithFurnace({ furnaceContents = { [3] = { name = "minecraft:charcoal", count = 5 } } })
+	-- 16 bûches (12 + 4) : 2 lots, donc 2 des 5 charbons sortis.
+	terrainWithFurnace({
+		chestContents = { [1] = { name = LOG, count = 12 } },
+		furnaceContents = { [3] = { name = "minecraft:charcoal", count = 5 } },
+	})
 
 	run("1")
 
 	H.isNil(furnaceSlots()[3], "la sortie est vidée")
-	H.eq(furnaceSlots()[2].name, "minecraft:charcoal", "et repart au foyer")
+	H.eq(furnaceSlots()[2].name, "minecraft:charcoal", "le charbon repart au foyer")
+	H.eq(furnaceSlots()[2].count, 2, "juste ce qu'il faut")
+	H.eq(chestSummary()["minecraft:charcoal"], 3, "le reste attend au coffre")
+end)
+
+H.case("la turtle se ravitaille au charbon sorti du four, pas aux bûches", function()
+	-- La sortie du four est vidée AVANT le ravitaillement. Dans l'autre ordre,
+	-- la turtle à court ne trouvait au coffre que des bûches et en brûlait une
+	-- quinzaine -- 15 unités chacune, contre 80 une fois en charbon de bois.
+	terrainWithFurnace({
+		fuel = 50,
+		chestContents = { [1] = { name = LOG, count = 32 } },
+		furnaceContents = { [3] = { name = "minecraft:charcoal", count = 16 } },
+	})
+	mock.setSlot(1, nil)     -- pas de charbon à bord
+
+	run("1")
+
+	local logs = (chestSummary()[LOG] or 0)
+	local slots = furnaceSlots()
+	for _, s in pairs(slots) do
+		if s.name == LOG then logs = logs + s.count end
+	end
+	H.eq(logs, 36, "aucune bûche brûlée par la turtle (32 + 4)")
+	H.ok(mock.getTurtle().fuel > 1000, "ravitaillée au charbon de bois")
 end)
 
 H.case("un four déjà plein ne fait pas boucler le service", function()

@@ -913,70 +913,175 @@ end
 -- Nom de périphérique correspondant à une direction du turtle.
 local SIDES = { forward = "front", up = "top", down = "bottom" }
 
---- Fait tourner le four : sortir le charbon, remplir l'entrée et le foyer.
---
+-- ---------------------------------------------------------------------------
+-- Four
+-- ---------------------------------------------------------------------------
 -- C'est le CONTENEUR qui alimente le four -- pushItems avec un slot de
 -- destination explicite. Une turtle ne peut pas viser un slot précis d'un
--- voisin : turtle.drop() laisse le conteneur choisir, et pour une bûche, qui
--- est à la fois fondable et combustible, ce choix est indéterminé.
+-- voisin : turtle.drop() laisse le four choisir, et une bûche est à la fois
+-- fondable et combustible. Elle ne peut pas non plus y « puiser » le charbon
+-- produit : par le côté, un four n'expose que son foyer (SLOTS_FOR_SIDES), si
+-- bien qu'un turtle.suck() lui volerait son combustible.
 --
--- C'est le bug qu'avait l'ancienne version : `chest.pushItems(furnaceSide,
--- chestSlot)` sans quatrième argument envoyait le combustible dans le slot
--- d'ENTRÉE. La boucle surveillait le foyer, qui restait donc vide, et ne
--- s'arrêtait qu'une fois le conteneur vidé de ses bûches -- ou jamais, si
--- pushItems ne déplaçait plus rien.
---
--- Slots d'un four : 1 entrée, 2 foyer, 3 sortie.
-local function runFurnace(depotWhere)
+-- Slots d'un four, vus par l'API peripheral : 1 entrée, 2 foyer, 3 sortie.
+
+-- Combustibles du four, en cuissons par objet : durée de combustion du jeu
+-- divisée par les 200 ticks d'une cuisson. Charbon : 1600 ticks, soit 8. Bois :
+-- 300 ticks, soit 1,5. Dans l'ordre de préférence -- un charbon de bois au
+-- foyer rend 0,875 charbon par bûche, une bûche au foyer seulement 0,6. Le bois
+-- ne sert qu'à amorcer, tant qu'il n'y a encore aucun charbon.
+local FURNACE_FUELS = {
+	{ name = "charbon de bois", smelts = 8, match = function(n) return n == "minecraft:charcoal" end },
+	{ name = "charbon", smelts = 8, match = function(n) return n == "minecraft:coal" end },
+	{ name = "bois", smelts = 1.5, wood = true, match = function(n) return isWood(n) end },
+}
+
+local function fuelKind(name)
+	for _, kind in ipairs(FURNACE_FUELS) do
+		if name and kind.match(name) then return kind end
+	end
+	return nil
+end
+
+--- Plus petit lot sans perte : `fuel` objets de combustible cuisent exactement
+--- `input` bûches. 8 bûches pour 1 charbon, 3 bûches pour 2 bûches de bois.
+local function lotFor(kind)
+	local fuel = 1
+	while kind.smelts * fuel ~= math.floor(kind.smelts * fuel) do fuel = fuel + 1 end
+	return kind.smelts * fuel, fuel
+end
+
+--- Ouvre le conteneur et le four, vus depuis la turtle.
+-- @return { chest, chestSide, furnace, furnaceSide }, ou nil + raison
+local function openFurnace(depotWhere)
 	local furnaceSide = sideMatching({ "furnace", "smelter", "kiln" })
-	if not furnaceSide then return false, "aucun four" end
+	if not furnaceSide then return nil, "aucun four" end
 
 	local chestSide = SIDES[depotWhere]
-	if not chestSide then return false, "depot inaccessible" end
+	if not chestSide then return nil, "depot inaccessible" end
 
 	local okChest, chest = pcall(peripheral.wrap, chestSide)
 	local okFurnace, furnace = pcall(peripheral.wrap, furnaceSide)
 	if not okChest or not chest or not okFurnace or not furnace then
-		return false, "peripherique illisible"
+		return nil, "peripherique illisible"
 	end
+	return { chest = chest, chestSide = chestSide, furnace = furnace, furnaceSide = furnaceSide }
+end
 
-	--- Premier slot du conteneur dont le contenu satisfait `accept`.
-	local function findInChest(accept)
-		local ok, list = pcall(chest.list)
-		if not ok or type(list) ~= "table" then return nil end
-		for slot, item in pairs(list) do
-			if item and item.name and accept(item.name) then return slot end
+--- Vide la sortie du four dans le conteneur.
+--
+-- Fait AVANT le ravitaillement de la turtle : le charbon de bois produit depuis
+-- le dernier service est ainsi disponible pour elle, et elle n'a jamais à
+-- brûler de bûches tant qu'il en reste.
+local function collectFurnace(dev)
+	for _ = 1, 8 do
+		local ok, moved = pcall(dev.furnace.pushItems, dev.chestSide, 3)
+		if not ok or not moved or moved == 0 then break end
+	end
+end
+
+--- Objets du conteneur satisfaisant `accept` : total, et liste des slots.
+local function inChest(dev, accept)
+	local ok, list = pcall(dev.chest.list)
+	local total, slots = 0, {}
+	if not ok or type(list) ~= "table" then return 0, slots end
+	for slot, item in pairs(list) do
+		if item and item.name and accept(item.name) then
+			total = total + item.count
+			slots[#slots + 1] = slot
 		end
-		return nil
+	end
+	table.sort(slots)
+	return total, slots
+end
+
+--- Pousse exactement `count` objets acceptés vers un slot du four.
+-- @return nombre réellement déplacé
+local function pushCount(dev, accept, toSlot, count)
+	local moved = 0
+	local _, slots = inChest(dev, accept)
+	for _, slot in ipairs(slots) do
+		if moved >= count then break end
+		local ok, n = pcall(dev.chest.pushItems, dev.furnaceSide, slot, count - moved, toSlot)
+		if ok and n then moved = moved + n end
+	end
+	return moved
+end
+
+--- Rend au conteneur `count` objets d'un slot du four.
+local function pullBack(dev, fromSlot, count)
+	if count > 0 then pcall(dev.furnace.pushItems, dev.chestSide, fromSlot, count) end
+end
+
+--- Charge le four par lots exacts, pour qu'aucun combustible ne brûle à vide.
+--
+-- Un combustible allumé brûle jusqu'au bout, qu'il reste ou non quelque chose
+-- à cuire : un charbon allumé pour 3 bûches perd 5 cuissons sur 8. On ne
+-- charge donc qu'un four dont l'ENTRÉE est vide -- le lot précédent est alors
+-- entièrement cuit et rien ne brûle plus -- et uniquement par multiples du lot
+-- exact : 8 bûches par charbon, 3 bûches par paire de bûches de bois. Les
+-- bûches qui ne remplissent pas un lot attendent le service suivant.
+--
+-- Un combustible qui n'est pas encore allumé, lui, ne se perd pas : il attend
+-- dans le foyer et compte pour le lot suivant.
+-- @return true, ou false + raison
+local function feedFurnace(dev)
+	local okIn, input = pcall(dev.furnace.getItemDetail, 1)
+	local okFuel, fuel = pcall(dev.furnace.getItemDetail, 2)
+	if not okIn or not okFuel then return false, "four illisible" end
+	if input then return true end          -- lot en cours de cuisson
+
+	-- Le combustible préféré disponible.
+	local preferred
+	for _, kind in ipairs(FURNACE_FUELS) do
+		if inChest(dev, kind.match) > 0 then preferred = kind break end
 	end
 
-	-- 1. Sortie vers le conteneur. Chaque transfert doit déplacer quelque
-	--    chose, sinon on s'arrête : c'est ce qui borne la boucle.
-	for _ = 1, 8 do
-		local ok, moved = pcall(furnace.pushItems, chestSide, 3)
-		if not ok or not moved or moved == 0 then break end
-	end
+	local kind = fuel and fuelKind(fuel.name)
+	if fuel and not kind then return false, "foyer occupe par " .. tostring(fuel.name) end
 
-	-- 2. Entrée : des bûches, et seulement des bûches.
-	for _ = 1, 8 do
-		local slot = findInChest(isWood)
-		if not slot then break end
-		local ok, moved = pcall(chest.pushItems, furnaceSide, slot, 64, 1)
-		if not ok or not moved or moved == 0 then break end
+	-- Du bois au foyer alors que du charbon est disponible : on le reprend,
+	-- rien ne cuisant, pour charger le combustible le plus rentable.
+	if kind and preferred and kind ~= preferred and preferred.smelts > kind.smelts then
+		pullBack(dev, 2, fuel.count)
+		fuel, kind = nil, nil
 	end
+	kind = kind or preferred
+	if not kind then return true end       -- rien à brûler
 
-	-- 3. Foyer : du charbon si le conteneur en a, sinon des bûches.
-	local function isBurnable(name)
-		return name == "minecraft:charcoal" or name == "minecraft:coal"
-			or name == "minecraft:coal_block" or isWood(name)
-	end
-	for _ = 1, 4 do
-		local slot = findInChest(isBurnable)
-		if not slot then break end
-		local ok, moved = pcall(chest.pushItems, furnaceSide, slot, 8, 2)
-		if not ok or not moved or moved == 0 then break end
-	end
+	local lotIn, lotFuel = lotFor(kind)
+	local logs = inChest(dev, isWood)
+	local spare = inChest(dev, kind.match)
+	local present = fuel and fuel.count or 0
 
+	-- Plus grand nombre de lots que permettent le stock et la place (64 par
+	-- slot). Pour le bois, entrée et foyer puisent dans le même stock.
+	local lots = 0
+	for k = math.floor(64 / lotIn), 1, -1 do
+		local needFuel = math.max(0, k * lotFuel - present)
+		local enough
+		if kind.wood then
+			enough = k * lotIn + needFuel <= logs
+		else
+			enough = k * lotIn <= logs and needFuel <= spare
+		end
+		if enough and present + needFuel <= 64 then lots = k break end
+	end
+	if lots == 0 then return true end      -- pas encore de quoi faire un lot
+
+	local wantFuel = math.max(0, lots * lotFuel - present)
+	local gotFuel = pushCount(dev, kind.match, 2, wantFuel)
+	if gotFuel < wantFuel then
+		-- Moins de combustible que prévu : on réduit le nombre de lots. Le
+		-- combustible en trop n'est pas allumé, il attend le lot suivant.
+		lots = math.floor((present + gotFuel) / lotFuel)
+	end
+	if lots == 0 then return true end
+
+	local wantIn = lots * lotIn
+	local gotIn = pushCount(dev, isWood, 1, wantIn)
+	local exact = math.floor(gotIn / lotIn) * lotIn
+	pullBack(dev, 1, gotIn - exact)        -- jamais de lot incomplet en cuisson
 	return true
 end
 
@@ -1314,6 +1419,16 @@ STATES[S.SERVICE] = function()
 		})
 		if not ok then journal("Vidage : " .. tostring(why) .. " (slot " .. tostring(slot) .. ")") end
 
+		-- Sortie du four AVANT le ravitaillement : le charbon de bois produit
+		-- depuis le dernier service est alors à portée de la turtle, qui n'a
+		-- pas à brûler de bûches tant qu'il en reste.
+		local furnace
+		if CONFIG.makeCharcoal then
+			local why
+			furnace, why = openFurnace(where)
+			if furnace then collectFurnace(furnace) else journal("Four : " .. why) end
+		end
+
 		refuel(where)
 
 		-- refuelFromChest garde à bord le reste d'une pile entamée : c'est
@@ -1330,8 +1445,8 @@ STATES[S.SERVICE] = function()
 
 		if not findSapling() then fetchSaplings(where) end
 
-		if CONFIG.makeCharcoal then
-			local fine, reason = runFurnace(where)
+		if furnace then
+			local fine, reason = feedFurnace(furnace)
 			if not fine then journal("Four : " .. tostring(reason)) end
 		end
 
