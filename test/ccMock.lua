@@ -675,54 +675,91 @@ end
 --- lieu d'échouer.
 function M.setEventBudget(n) eventBudget = n end
 
+--- Prochain événement de la file, ou du minuteur le plus proche.
+local function nextEvent()
+	eventBudget = eventBudget - 1
+	if eventBudget < 0 then
+		error("ccMock : budget d'evenements epuise (attente sans fin ?)", 0)
+	end
+	if #events > 0 then return table.remove(events, 1) end
+	if #timers > 0 then
+		table.sort(timers, function(a, b) return a.at < b.at end)
+		local tm = table.remove(timers, 1)
+		clock = tm.at
+		return { "timer", tm.id }
+	end
+	error("ccMock : pullEvent sans événement en attente (deadlock)", 0)
+end
+
+-- Vrai pendant un parallel.* : pullEvent y CÈDE la main à l'ordonnanceur,
+-- comme en jeu, au lieu de tirer lui-même l'événement.
+local inParallel = false
+
 function os_.pullEvent(filter)
+	if inParallel and coroutine.isyieldable() then
+		return coroutine.yield(filter)
+	end
 	while true do
-		eventBudget = eventBudget - 1
-		if eventBudget < 0 then
-			error("ccMock : budget d'evenements epuise (attente sans fin ?)", 0)
-		end
-		if #events > 0 then
-			local e = table.remove(events, 1)
-			if not filter or e[1] == filter then return table.unpack(e) end
-		elseif #timers > 0 then
-			table.sort(timers, function(a, b) return a.at < b.at end)
-			local tm = table.remove(timers, 1)
-			clock = tm.at
-			if not filter or filter == "timer" then return "timer", tm.id end
-		else
-			error("ccMock : pullEvent sans événement en attente (deadlock)", 0)
-		end
+		local e = nextEvent()
+		if not filter or e[1] == filter then return table.unpack(e) end
 	end
 end
 
 os_.pullEventRaw = os_.pullEvent
 
--- Ordonnanceur coopératif, suffisant pour exécuter un script complet : les
--- coroutines sont reprises à tour de rôle, et un événement n'est tiré de la
--- file que lorsqu'elles sont toutes en attente.
+-- Ordonnanceur coopératif, fidèle à celui de CC sur le point qui compte :
+-- CHAQUE coroutine reçoit chaque événement, selon son propre filtre.
+--
+-- La première version laissait pullEvent tirer lui-même l'événement, sans
+-- céder la main : la coroutine qui attendait le recevait seule, et les autres
+-- ne s'exécutaient jamais pendant une attente. Un double traitement -- la
+-- même touche vue par l'attente de la machine ET par la coroutine
+-- d'interface -- était donc invisible ici, alors qu'en jeu il annulait la
+-- commande.
 local parallel_ = {}
 
 local function runParallel(waitForAll, ...)
 	local fns = { ... }
-	local cos = {}
+	local cos, filters, started = {}, {}, {}
 	for i, f in ipairs(fns) do cos[i] = coroutine.create(f) end
+
+	local outer = inParallel
+	inParallel = true
+	local function finish(...)
+		inParallel = outer
+		return ...
+	end
 
 	local event = {}
 	while true do
 		local alive = 0
-		for _, co in ipairs(cos) do
+		for i, co in ipairs(cos) do
 			if coroutine.status(co) == "suspended" then
-				local ok, err = coroutine.resume(co, table.unpack(event))
-				if not ok then error(err, 0) end
+				local wants = not started[i] or filters[i] == nil
+					or filters[i] == event[1] or event[1] == "terminate"
+				if wants then
+					started[i] = true
+					local ok, res = coroutine.resume(co, table.unpack(event))
+					if not ok then
+						inParallel = outer
+						error(res, 0)
+					end
+					filters[i] = res
+				end
 			end
 			if coroutine.status(co) == "dead" then
-				if not waitForAll then return end
+				if not waitForAll then return finish() end
 			else
 				alive = alive + 1
 			end
 		end
-		if alive == 0 then return end
-		event = { os_.pullEvent() }
+		if alive == 0 then return finish() end
+		local ok, e = pcall(nextEvent)
+		if not ok then
+			inParallel = outer
+			error(e, 0)
+		end
+		event = e
 	end
 end
 

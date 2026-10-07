@@ -420,6 +420,15 @@ end
 -- Les commandes sont COLLECTÉES ici et CONSOMMÉES entre deux transitions.
 -- L'ancienne version basculait makeCharcoal depuis la coroutine d'événements,
 -- en pleine opération de la boucle principale.
+--
+-- C'est le SEUL endroit où une touche devient une commande. Sous parallel,
+-- chaque coroutine reçoit chaque événement : quand l'attente de la machine
+-- traduisait aussi les touches, un appui sur C était compté deux fois -- une
+-- bascule immédiate, puis une seconde au réveil suivant, qui l'annulait.
+-- Pour que la machine réagisse sans attendre la fin de son minuteur, elle est
+-- réveillée par un événement dédié.
+local CMD_EVENT = "ccchopper_cmd"
+
 local function collect()
 	local e = { waitEvent() }
 	if ctx.stopped then return end
@@ -427,7 +436,10 @@ local function collect()
 	local name = e[1]
 	if name == "char" or name == "mouse_click" or name == "monitor_touch" then
 		local cmd = ccUi.dispatch(table.unpack(e))
-		if cmd then ctx.pending[#ctx.pending + 1] = cmd end
+		if cmd then
+			ctx.pending[#ctx.pending + 1] = cmd
+			os.queueEvent(CMD_EVENT)
+		end
 		draw()
 	elseif name == "timer" and e[2] == ctx.drawTimer then
 		ctx.drawTimer = os.startTimer(0.5)
@@ -1289,21 +1301,14 @@ STATES[S.TEND] = function()
 		-- longue attente est réservée à la pousse naturelle -- l'appliquer
 		-- aussi après une poudre d'os donnait 20 s entre deux applications.
 		--
-		-- L'attente est aussi le seul moment où ce script est disponible pour
-		-- l'utilisateur : les événements sont donc traduits en commandes ici,
-		-- et consommés par applyCommands au tour suivant.
+		-- Une commande reçue pendant l'attente l'interrompt : collect() la
+		-- traduit et réveille la machine, qui l'applique au tour suivant.
 		local timer = os.startTimer(fertilized and CONFIG.fertilizeWait or CONFIG.growWait)
 		while true do
-			local e = { waitEvent() }
+			local event, id = waitEvent()
 			if ctx.stopped then return S.TEND end
-			if e[1] == "timer" and e[2] == timer then break end
-			if e[1] == "char" or e[1] == "mouse_click" or e[1] == "monitor_touch" then
-				local cmd = ccUi.dispatch(table.unpack(e))
-				if cmd then
-					ctx.pending[#ctx.pending + 1] = cmd
-					break
-				end
-			end
+			if event == "timer" and id == timer then break end
+			if event == CMD_EVENT or #ctx.pending > 0 then break end
 		end
 		return S.TEND
 	end
@@ -1502,6 +1507,13 @@ STATES[S.AWAIT] = function()
 	repeat
 		event, id = waitEvent()
 		if ctx.stopped then return S.AWAIT end
+		-- Une commande n'attend pas le terme du délai, qui monte à une minute.
+		-- Le délai est rendu tel quel : le prochain passage le redoublerait,
+		-- alors que rien n'a été attendu jusqu'au bout.
+		if event == CMD_EVENT or #ctx.pending > 0 then
+			ctx.awaitDelay = ctx.awaitDelay / 2
+			return S.AWAIT
+		end
 	until event == "turtle_inventory" or (event == "timer" and id == timer)
 
 	if event == "turtle_inventory" then ctx.awaitDelay = nil end

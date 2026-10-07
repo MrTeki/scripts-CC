@@ -32,6 +32,15 @@ local function run(...)
 	return sorties
 end
 
+--- Exécute un script qui finit dans une attente VOLONTAIRE : c'est le budget
+--- d'événements du mock qui l'interrompt, depuis l'ordonnanceur. Toute autre
+--- erreur remonte.
+local function runWaiting(...)
+	local ok, err = pcall(run, ...)
+	if not ok and not tostring(err):find("budget", 1, true) then error(err, 0) end
+	return ok
+end
+
 --- Petit chêne : tronc de 4, quelques feuilles au sommet.
 -- La turtle est en (0,0,0) face à +X, le tronc pousse en (1,0,0).
 local function plantTree()
@@ -373,12 +382,11 @@ end)
 
 H.case("sans sapling nulle part, la turtle réclame au lieu de s'arrêter", function()
 	-- L'attente est volontaire et sans fin : c'est le budget d'événements du
-	-- mock qui y met un terme, et la machine à états l'attrape comme n'importe
-	-- quelle erreur. Ce qui est vérifié ici, c'est qu'elle a bien tourné en
-	-- ATTENTE en le disant, plutôt que de s'arrêter en silence.
+	-- mock qui y met un terme. Ce qui est vérifié ici, c'est qu'elle a bien
+	-- tourné en ATTENTE en le disant, plutôt que de s'arrêter en silence.
 	terrain({ saplings = 0 })
 	mock.setEventBudget(60)
-	run("1")
+	runWaiting("1")
 
 	local log = mock.getFile("ccchop.log") or ""
 	H.contains(log, "Plus de sapling", "la turtle dit ce qui lui manque")
@@ -662,8 +670,9 @@ H.case("une sauvegarde de l'ancien format est reprise, pas jetée", function()
 		[3] = { X = 0, Y = 0, Z = 0, direction = 0 },
 		[4] = "right", [5] = "left", [6] = "wait", [7] = {},
 	}))
+	mock.setEventBudget(100)
 
-	run("1")
+	runWaiting("1")     -- finit en attente de la pousse
 
 	local t = mock.getTurtle()
 	H.eq(t.x, 0, "revenue en x")
@@ -792,7 +801,7 @@ H.case("RÉGRESSION : un arbre adulte devant n'exige pas de sapling", function()
 	          chestContents = { [1] = { name = "minecraft:coal", count = 32 } } })
 	mock.setEventBudget(60)
 
-	run("1")     -- finit en attente : plus rien à replanter ensuite
+	runWaiting("1")     -- finit en attente : plus rien à replanter ensuite
 
 	H.eq(treeBlocks(), 0, "l'arbre est abattu malgré l'absence de sapling")
 end)
@@ -802,9 +811,11 @@ H.case("RÉGRESSION : une attente qui dure espace ses services", function()
 	-- cherché et turtle retournée compris : vue de dehors, elle tournait sur
 	-- elle-même sans fin.
 	terrain({ noTree = true, saplings = 0 })
-	mock.setEventBudget(30)
+	-- L'écran se redessine toutes les 0,5 s : chaque seconde d'attente coûte
+	-- deux événements.
+	mock.setEventBudget(400)
 
-	run("1")
+	runWaiting("1")
 
 	local times = {}
 	for t in (mock.getFile("ccchop.log") or ""):gmatch("%[([%d%.]+)%] SERVICE | SERVICE") do
@@ -835,4 +846,67 @@ H.case("à court de charbon, les bûches servent de carburant, jamais les saplin
 	-- c'est la récolte. Viser 2000 aurait englouti tout le coffre.
 	H.ok((chestSummary()[LOG] or 0) >= 15, "la récolte reste au coffre : "
 		.. tostring(chestSummary()[LOG]))
+end)
+
+-- ---------------------------------------------------------------------------
+-- Commandes pendant une attente
+-- ---------------------------------------------------------------------------
+
+--- Simule un appui sur une touche dès que la turtle se met à attendre la
+--- pousse (minuteur de growWait).
+local function pressDuringGrowth(key)
+	local vraiTimer = os.startTimer
+	local pressed = false
+	os.startTimer = function(s)
+		local id = vraiTimer(s)
+		if s == 20 and not pressed then
+			pressed = true
+			os.queueEvent("char", key)
+		end
+		return id
+	end
+	return function() os.startTimer = vraiTimer end
+end
+
+H.case("RÉGRESSION : C bascule le charbon une seule fois, et tout de suite", function()
+	-- Constaté en jeu : en attente de pousse, la touche était vue par l'attente
+	-- de la machine ET par la coroutine d'interface. La première basculait
+	-- aussitôt, la seconde empilait une bascule appliquée au réveil suivant,
+	-- 20 s plus tard -- qui annulait la première.
+	terrain({ noTree = true })
+	mock.setBlock(1, 0, 0, SAPLING)
+	mock.setEventBudget(200)
+	local restore = pressDuringGrowth("c")
+
+	runWaiting("1")
+	restore()
+
+	local log = mock.getFile("ccchop.log") or ""
+	local active = log:match("%[([%d%.]+)%] %S+ | Charbon de bois : active")
+	H.ok(active ~= nil, "le charbon est activé")
+	H.ok(tonumber(active) < 20, "sans attendre la fin de l'attente : " .. tostring(active))
+	H.ok(not log:find("Charbon de bois : desactive", 1, true), "et pas désactivé ensuite")
+end)
+
+H.case("STOP pendant une attente est pris en compte sans attendre son terme", function()
+	-- En ATTENTE, le délai monte jusqu'à une minute : une commande ne doit
+	-- pas attendre son terme.
+	terrain({ noTree = true, saplings = 0 })
+	mock.setEventBudget(400)
+	local vraiTimer = os.startTimer
+	os.startTimer = function(s)
+		local id = vraiTimer(s)
+		if s >= 5 and s ~= 20 then os.queueEvent("char", "x") end
+		return id
+	end
+
+	local ok = runWaiting("1")
+	os.startTimer = vraiTimer
+
+	H.ok(ok, "le script s'arrête de lui-même")
+	local log = mock.getFile("ccchop.log") or ""
+	local waited = tonumber(log:match("%[([%d%.]+)%] ATTENTE | ATTENTE"))
+	local stopped = tonumber(log:match("%[([%d%.]+)%] %S+ | Arret demande"))
+	H.ok(waited and stopped, "attente puis arrêt journalisés")
+	H.ok(stopped - waited < 1, ("arrêt en %.1f s, pas au terme du délai"):format(stopped - waited))
 end)
