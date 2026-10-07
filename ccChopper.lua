@@ -38,9 +38,7 @@
 -- pour qu'une évolution du mécanisme ne demande pas de rééditer les scripts
 -- déjà installés.
 
--- Pointe sur la branche de refonte le temps des essais. À rebasculer sur
--- .../scripts-CC/main/ une fois refonte/apis-socle fusionnée.
-local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/refonte/apis-socle/"
+local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
 -- Dépendances TRANSITIVES comprises : ccBoot n'installe que ce qui est listé.
 -- ccUtil n'est pas utilisé ici, mais ccUi le requiert -- l'oublier faisait

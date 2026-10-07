@@ -44,7 +44,7 @@ le disque (`F:\Minecraft\scripts CC\*.lua`) sont désormais du legacy.
 
 ---
 
-## Architecture (refonte en cours)
+## Architecture
 
 Chaque script reste **un fichier unique**, déployable seul sur un ordinateur en jeu.
 Le code commun est extrait dans des APIs partagées, installées au premier lancement.
@@ -149,9 +149,12 @@ secret.
 ### Installer sur un ordinateur en jeu
 
 ```
-pastebin get <id> ccQuarry
+wget https://raw.githubusercontent.com/MrTeki/scripts-CC/main/ccQuarry.lua ccQuarry
 ccQuarry 16 16 64
 ```
+
+Même chose pour `ccChopper`. Juste après une publication, GitHub peut servir
+l'ancienne version quelques minutes : son cache dure environ 5 minutes.
 
 Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossier
 `apis/` à la main ; le script le dit explicitement et donne l'URL.
@@ -160,9 +163,8 @@ Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossie
 
 ## État
 
-`main` contient les scripts tels qu'ils tournaient avant refonte, sans
-modification. La refonte de `ccQuarry.lua` et de `ccChopper.lua`, et
-l'extraction des APIs, se font sur `refonte/apis-socle`.
+`ccQuarry` et `ccChopper` tournent sur les APIs partagées, et sont validés en
+jeu. Les autres scripts sont encore tels qu'ils tournaient avant la refonte.
 
 Ce qui reste à faire, les limites connues et les vérifications en attente sont
 dans [ROADMAP.md](ROADMAP.md).

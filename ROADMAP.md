@@ -1,23 +1,19 @@
 # Feuille de route
 
-État au dernier essai en jeu : `ccQuarry` tourne sur les APIs partagées, le
-bootstrap installe tout seul, et le chantier va au bout. Ce qui suit est ce qui
+État au dernier essai en jeu : `ccQuarry` et `ccChopper` tournent sur les APIs
+partagées, le bootstrap installe tout seul, et les deux vont au bout. Ce qui suit est ce qui
 reste, par ordre de valeur décroissante.
 
 ---
 
 ## Prochaine étape
 
-### Fusionner `refonte/apis-socle` dans `main`
-
-`REPO` pointe encore sur la branche de refonte. Une fois fusionnée, rebasculer
-la constante en tête de [ccQuarry.lua](ccQuarry.lua) **et de**
-[ccChopper.lua](ccChopper.lua) sur `.../scripts-CC/main/`. Ça raccourcit l'URL
-d'installation et évite d'oublier qu'on tourne sur une branche.
+### `REPO`, une ligne par script
 
 C'est la seule chose que le manifeste ne peut pas porter — il faut bien une URL
-en dur pour aller le chercher. La corvée grandit donc d'une ligne par script
-migré : à six scripts, prévoir un `sed` plutôt que six éditions à la main.
+en dur pour aller le chercher. Elle pointe sur `main` dans les scripts migrés ;
+tout script migré ensuite doit en faire autant. Si la branche de publication
+change un jour, prévoir un `sed` plutôt qu'une édition par script.
 
 ### Détecter les APIs modifiées sans montée de version
 
