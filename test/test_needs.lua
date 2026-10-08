@@ -60,3 +60,23 @@ for _, script in ipairs(SCRIPTS) do
 		H.eq(table.concat(missing, ", "), "", "APIs chargées mais absentes de NEEDS")
 	end)
 end
+
+-- ---------------------------------------------------------------------------
+-- Boutons : la touche annoncée à l'écran est celle qui agit
+-- ---------------------------------------------------------------------------
+-- ccUi surligne dans le libellé la lettre de raccourci, ou la PREMIÈRE lettre
+-- quand la touche n'y figure pas. STOP était lié à x : l'écran montrait le S,
+-- qui ne faisait rien.
+
+for _, script in ipairs(SCRIPTS) do
+	H.case(script .. " : chaque raccourci figure dans son libellé, sans doublon", function()
+		local seen = {}
+		for args in read(script):gmatch("ccUi%.addButton%((%b{})%)") do
+			local label = assert(args:match('label%s*=%s*"([^"]+)"'), "libellé introuvable : " .. args)
+			local key = (args:match('key%s*=%s*"([^"]+)"') or label:sub(1, 1)):lower()
+			H.ok(label:lower():find(key, 1, true), ("%s : touche %q absente du libellé"):format(label, key))
+			H.isNil(seen[key], ("touche %q partagée par %s et %s"):format(key, tostring(seen[key]), label))
+			seen[key] = label
+		end
+	end)
+end

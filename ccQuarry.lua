@@ -368,7 +368,10 @@ local function setupUi()
 	ccUi.useMonitor()
 	ccUi.addButton({ label = "REFUEL", y = 1, cmd = "refuel" })
 	ccUi.addButton({ label = "PAUSE", y = 2, cmd = "pause" })
-	ccUi.addButton({ label = "STOP", y = 3, cmd = "abort", key = "x" })
+	-- Pas de touche explicite : la première lettre, S, est celle que
+	-- l'écran met en évidence. L'ancien raccourci, x, n'apparaissait pas dans
+	-- le libellé ; ccUi surlignait donc le S, qui ne faisait rien.
+	ccUi.addButton({ label = "STOP", y = 3, cmd = "abort" })
 	ccUi.clear()
 end
 

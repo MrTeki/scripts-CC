@@ -393,7 +393,10 @@ local function setupUi()
 	ccUi.useMonitor()
 	ccUi.addButton({ label = "CHARBON", y = 1, cmd = "charcoal", key = "c" })
 	ccUi.addButton({ label = "PAUSE", y = 2, cmd = "pause" })
-	ccUi.addButton({ label = "STOP", y = 3, cmd = "abort", key = "x" })
+	-- Pas de touche explicite : la première lettre, S, est celle que
+	-- l'écran met en évidence. L'ancien raccourci, x, n'apparaissait pas dans
+	-- le libellé ; ccUi surlignait donc le S, qui ne faisait rien.
+	ccUi.addButton({ label = "STOP", y = 3, cmd = "abort" })
 	ccUi.clear()
 end
 
@@ -607,6 +610,13 @@ end
 -- ceux qui ramènent justement vers l'origine.
 local function chopStop()
 	if ctx.stopped or ctx.abort then return "abort" end
+	-- Un STOP reçu pendant l'abattage n'attend pas la fin de l'arbre : les
+	-- commandes ne sont appliquées qu'entre deux états, et un grand chêne en
+	-- prend quatre minutes. On déroule la récursion tout de suite ; la
+	-- commande elle-même est appliquée à la sortie de l'état.
+	for _, cmd in ipairs(ctx.pending) do
+		if cmd == "abort" then return "abort" end
+	end
 	if ctx.lost then return "perdu" end
 	if ccInv.freeCount() <= CONFIG.spareSlots then return "inventaire" end
 	if ccFuel.level() <= ccFuel.reserve(ccNav.position(), nil, CONFIG.fuelMargin) then

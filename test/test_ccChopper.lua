@@ -896,7 +896,7 @@ H.case("STOP pendant une attente est pris en compte sans attendre son terme", fu
 	local vraiTimer = os.startTimer
 	os.startTimer = function(s)
 		local id = vraiTimer(s)
-		if s >= 5 and s ~= 20 then os.queueEvent("char", "x") end
+		if s >= 5 and s ~= 20 then os.queueEvent("char", "s") end
 		return id
 	end
 
@@ -909,4 +909,35 @@ H.case("STOP pendant une attente est pris en compte sans attendre son terme", fu
 	local stopped = tonumber(log:match("%[([%d%.]+)%] %S+ | Arret demande"))
 	H.ok(waited and stopped, "attente puis arrêt journalisés")
 	H.ok(stopped - waited < 1, ("arrêt en %.1f s, pas au terme du délai"):format(stopped - waited))
+end)
+
+H.case("STOP en plein abattage interrompt l'arbre au lieu de le finir", function()
+	-- Les commandes ne sont appliquées qu'entre deux états : sans regarder les
+	-- commandes en attente, la turtle finissait l'arbre -- quatre minutes sur
+	-- un grand chêne -- avant de s'arrêter.
+	terrain({ noTree = true })
+	for z = 0, 9 do mock.setBlock(1, 0, z, LOG) end
+
+	-- En jeu, chaque commande turtle rend la main : la coroutine d'interface
+	-- reçoit la touche entre deux coups de hache. On le simule au 3e coup.
+	local vraiDig, coups = turtle.digUp, 0
+	turtle.digUp = function(...)
+		coups = coups + 1
+		if coups == 3 then
+			os.queueEvent("char", "s")
+			os.queueEvent("ccmock_tick")
+			os.pullEvent("ccmock_tick")
+		end
+		return vraiDig(...)
+	end
+
+	local ok, err = pcall(run, "1")
+	turtle.digUp = vraiDig
+	H.ok(ok, tostring(err))
+
+	H.ok(treeBlocks() > 0, "l'arbre n'est pas fini : " .. treeBlocks() .. " bûches restent")
+	local t = mock.getTurtle()
+	H.eq(t.z, 0, "la turtle est redescendue")
+	H.eq(t.x, 0, "et rentrée")
+	H.contains(mock.getFile("ccchop.log") or "", "interrompu (abort)", "le journal le dit")
 end)
