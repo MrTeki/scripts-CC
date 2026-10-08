@@ -59,7 +59,8 @@ function M.reset(opts)
 	-- donc un plafond serré fait échouer une boucle sans fin en quelques
 	-- secondes plutôt que de figer la suite.
 	eventBudget = opts.eventBudget or 2000
-	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {} }
+	screen = { w = opts.termWidth or 39, h = opts.termHeight or 13, x = 1, y = 1, lines = {},
+		colour = true, bg = 32768, bgs = {} }
 	t = {
 		x = 0, y = 0, z = 0, dir = 0,
 		fuel = opts.fuel or 1000,
@@ -78,7 +79,9 @@ local function key(x, y, z) return x .. "," .. y .. "," .. z end
 
 --- Définit un bloc. `def` accepte un nom court ou une table complète.
 -- Champs : name, unbreakable (bedrock), falling (gravier/sable),
---          regenerates (générateur de cobble), inventory (coffre)
+--          regenerates (générateur de cobble), inventory (coffre),
+--          state (renvoyé par inspect, ex. { age = 7 }),
+--          drops (liste { name, count } ramassée au lieu du bloc lui-même)
 function M.setBlock(x, y, z, def)
 	if def == nil then world[key(x, y, z)] = nil return end
 	if type(def) == "string" then def = { name = def } end
@@ -273,6 +276,11 @@ end
 
 local textutils = {}
 
+local LUA_KEYWORDS = {}
+for w in ("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"):gmatch("%a+") do
+	LUA_KEYWORDS[w] = true
+end
+
 local function serializeValue(v, indent, seen)
 	local ty = type(v)
 	if ty == "number" or ty == "boolean" or ty == "nil" then return tostring(v) end
@@ -294,8 +302,12 @@ local function serializeValue(v, indent, seen)
 	for _, k in ipairs(intKeys) do
 		parts[#parts + 1] = inner .. "[" .. k .. "] = " .. serializeValue(v[k], inner, seen)
 	end
+	-- Clé qui n'est pas un identifiant (« minecraft:wheat ») : entre
+	-- crochets, comme le vrai textutils, sinon le résultat n'est pas du Lua.
 	for _, k in ipairs(strKeys) do
-		parts[#parts + 1] = inner .. k .. " = " .. serializeValue(v[k], inner, seen)
+		local name = k:match("^[%a_][%w_]*$") and not LUA_KEYWORDS[k] and k
+			or "[" .. string.format("%q", k) .. "]"
+		parts[#parts + 1] = inner .. name .. " = " .. serializeValue(v[k], inner, seen)
 	end
 
 	seen[v] = nil
@@ -456,7 +468,12 @@ local function digAt(x, y, z)
 	if not b then return false, "Nothing to dig here" end
 	if b.unbreakable then return false, "Unbreakable block detected" end
 	world[key(x, y, z)] = nil
-	store(b.name, 1)                -- ce qui déborde est perdu, comme en jeu
+	-- ce qui déborde est perdu, comme en jeu
+	if b.drops then
+		for _, d in ipairs(b.drops) do store(d.name, d.count) end
+	else
+		store(b.name, 1)
+	end
 	settle(x, y, z)
 	-- Bloc qui repousse aussitôt : générateur de cobble, sources infinies de
 	-- certains mods. Les dig réussissent alors indéfiniment.
@@ -477,7 +494,7 @@ function turtle.detectDown() return detectAt(t.x, t.y, t.z - 1) end
 local function inspectAt(x, y, z)
 	local b = world[key(x, y, z)]
 	if not b then return false, "No block to inspect" end
-	return true, { name = b.name, state = {} }
+	return true, { name = b.name, state = b.state or {} }
 end
 
 function turtle.inspect() local x, y, z = ahead() return inspectAt(x, y, z) end
@@ -558,12 +575,28 @@ end
 -- Turtle : pose, dépôt, aspiration
 -- ---------------------------------------------------------------------------
 
+--- Graine -> culture plantée. Comme en jeu, elle ne prend que sur de la
+--- terre labourée.
+local PLANTS = {
+	["minecraft:wheat_seeds"]    = "minecraft:wheat",
+	["minecraft:carrot"]         = "minecraft:carrots",
+	["minecraft:potato"]         = "minecraft:potatoes",
+	["minecraft:beetroot_seeds"] = "minecraft:beetroots",
+}
+
 local function placeAt(x, y, z)
 	local s = t.inv[t.selected]
 	if not s then return false, "No items to place" end
 	if world[key(x, y, z)] then return false, "Cannot place block here" end
 	if entities[key(x, y, z)] then return false, "Cannot place block here" end
-	if s.name:find("chest") then
+	local crop = PLANTS[s.name]
+	if crop then
+		local below = world[key(x, y, z - 1)]
+		if not below or below.name ~= "minecraft:farmland" then
+			return false, "Cannot place item here"
+		end
+		M.setBlock(x, y, z, { name = crop, state = { age = 0 } })
+	elseif s.name:find("chest") then
 		M.setChest(x, y, z, {}, 27)
 		world[key(x, y, z)].name = s.name
 	else
@@ -773,12 +806,12 @@ local function ensureLine(y) screen.lines[y] = screen.lines[y] or string.rep(" "
 function term.getSize() return screen.w, screen.h end
 function term.setCursorPos(x, y) screen.x, screen.y = x, y end
 function term.getCursorPos() return screen.x, screen.y end
-function term.clear() screen.lines = {} end
+function term.clear() screen.lines, screen.bgs = {}, {} end
 function term.clearLine() screen.lines[screen.y] = string.rep(" ", screen.w) end
-function term.setBackgroundColour() end
+function term.setBackgroundColour(c) screen.bg = c end
 function term.setTextColour() end
 function term.setCursorBlink() end
-function term.isColour() return true end
+function term.isColour() return screen.colour end
 function term.scroll(n)
 	local out = {}
 	for y = 1, screen.h do out[y] = screen.lines[y + n] end
@@ -792,6 +825,8 @@ function term.write(s)
 	local before = line:sub(1, screen.x - 1)
 	local after = line:sub(screen.x + #s)
 	screen.lines[screen.y] = (before .. s .. after):sub(1, screen.w)
+	screen.bgs[screen.y] = screen.bgs[screen.y] or {}
+	for i = 0, #s - 1 do screen.bgs[screen.y][screen.x + i] = screen.bg end
 	screen.x = screen.x + #s
 end
 
@@ -802,6 +837,12 @@ function term.current() return term end
 
 --- Contenu d'une ligne d'écran, pour assertion dans les tests d'UI.
 function M.screenLine(y) return (screen.lines[y] or ""):gsub("%s+$", "") end
+
+--- Couleur de fond d'une case de l'écran (valeur de `colors`), nil si vierge.
+function M.screenBg(x, y) return screen.bgs[y] and screen.bgs[y][x] end
+
+--- Écran couleur (Advanced) ou noir et blanc (basique).
+function M.setColour(enabled) screen.colour = enabled end
 
 local colors = setmetatable({}, { __index = function(_, k)
 	local names = { white = 1, orange = 2, magenta = 4, lightBlue = 8, yellow = 16,
@@ -931,7 +972,18 @@ function M.install()
 		return api
 	end
 
+	-- Côté de chaque inventaire renvoyé par wrap, pour peripheral.getName.
+	local wrappedSides = setmetatable({}, { __mode = "k" })
+
 	_G.peripheral = {
+		getName = function(p)
+			for _, q in ipairs(peripherals) do
+				if q.api == p then return q.side end
+			end
+			local side = wrappedSides[p]
+			if not side then error("bad argument #1 (table is not a peripheral)", 0) end
+			return side
+		end,
 		getNames = function()
 			local out = {}
 			for _, p in ipairs(peripherals) do out[#out + 1] = p.side end
@@ -987,7 +1039,11 @@ function M.install()
 				if p.side == side then return p.api end
 			end
 			local b = adjacentBlock(side)
-			if b and b.inventory then return inventoryApi(b) end
+			if b and b.inventory then
+				local api = inventoryApi(b)
+				wrappedSides[api] = side
+				return api
+			end
 			return nil
 		end,
 		find = function(ptype)

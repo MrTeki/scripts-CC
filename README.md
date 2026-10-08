@@ -75,8 +75,8 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 
 `ccQuarry.lua` les consomme toutes ; `ccChopper.lua` toutes sauf `ccPlan` et
 `ccNet`. `test/test_integration.lua` les valide ensemble, et
-`test/test_ccQuarry.lua` comme `test/test_ccChopper.lua` exécutent le script
-entier sous le mock.
+`test/test_ccQuarry.lua`, `test/test_ccChopper.lua` et `test/test_ccFarmer.lua`
+exécutent le script entier sous le mock.
 
 Deux besoins de `ccChopper` n'ont pas d'équivalent dans les APIs, et vivent donc
 dans le script :

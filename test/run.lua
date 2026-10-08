@@ -27,6 +27,7 @@ local MODULES = {
 	"test_integration",
 	"test_ccQuarry",
 	"test_ccChopper",
+	"test_ccFarmer",
 	"test_needs",
 }
 
