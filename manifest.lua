@@ -28,6 +28,7 @@ return {
 		ccChopper   = { path = "ccChopper.lua" },
 		ccStairs    = { path = "ccStairs.lua" },
 		ccFarm      = { path = "ccFarm.lua" },
+		ccFarmer    = { path = "ccFarmer.lua" },
 		ccInventory = { path = "ccInventory.lua" },
 		ccRemote    = { path = "ccRemote.lua" },
 		ccClock     = { path = "ccClock.lua" },

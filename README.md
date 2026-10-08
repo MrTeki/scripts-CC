@@ -15,6 +15,7 @@ le disque (`F:\Minecraft\scripts CC\*.lua`) sont désormais du legacy.
 | `ccChopper.lua` | turtle | Ferme à arbres : abattage, replantage, four à charbon, reprise après reboot |
 | `ccStairs.lua` | turtle | Creuse un escalier descendant, pose marches et torches |
 | `ccFarm.lua` | turtle | Ferme à cultures : récolte et replantage |
+| `ccFarmer.lua` | turtle | Champ 9x9 autour d'un coffre central : tournées en spirale, dépôt, recharge, reprise après reboot |
 | `ccInventory.lua` | computer | Gestion d'inventaire en réseau : coffres, moniteurs, crafting |
 | `ccRemote.lua` | pocket | Interface de pilotage à distance des turtles via rednet |
 | `ccClock.lua` | computer | Horloge sur moniteur |
@@ -153,7 +154,7 @@ wget https://raw.githubusercontent.com/MrTeki/scripts-CC/main/ccQuarry.lua ccQua
 ccQuarry 16 16 64
 ```
 
-Même chose pour `ccChopper`. Juste après une publication, GitHub peut servir
+Même chose pour `ccChopper` et `ccFarmer`. Juste après une publication, GitHub peut servir
 l'ancienne version quelques minutes : son cache dure environ 5 minutes.
 
 Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossier
@@ -164,7 +165,9 @@ Le premier lancement télécharge `apis/` tout seul. Sans HTTP, copier le dossie
 ## État
 
 `ccQuarry` et `ccChopper` tournent sur les APIs partagées, et sont validés en
-jeu. Les autres scripts sont encore tels qu'ils tournaient avant la refonte.
+jeu. `ccFarmer` est autonome (sans APIs ni amorce) et garde son propre repère :
+`dir 0` = +Y, origine sur le coffre central. Les autres scripts sont encore tels
+qu'ils tournaient avant la refonte.
 
 Ce qui reste à faire, les limites connues et les vérifications en attente sont
 dans [ROADMAP.md](ROADMAP.md).
