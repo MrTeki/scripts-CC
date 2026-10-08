@@ -49,7 +49,16 @@ local state = {
 }
 local flags   = { paused = false, runNow = false, quit = false }
 local ui      = { status = "Demarrage", alert = nil, fuelLow = false }
-local buttons = {}
+-- Boutons de l'interface : clic (écran couleur) ou touche du raccourci
+local buttons = {
+  { key = "p", bg = colors.orange,
+    label = function() return flags.paused and "Reprendre" or "Pause" end,
+    action = function() flags.paused = not flags.paused end },
+  { key = "t", bg = colors.lime, label = function() return "Tournee" end,
+    action = function() flags.runNow = true end },
+  { key = "q", bg = colors.red, label = function() return "Quitter" end,
+    action = function() flags.quit = true end },
+}
 local QUIT    = {}   -- valeur d'erreur sentinelle pour un arrêt propre
 
 ------------------------------------------------------------
@@ -493,21 +502,28 @@ local function draw()
     term.write(count)
   end
 
-  buttons = {}
   local x = 1
-  local function button(label, color, action)
+  -- Écran couleur : boutons colorés, cliquables. Écran noir et blanc (pas de
+  -- souris) : boutons blancs, la touche du raccourci en négatif.
+  local color = term.isColor()
+  local function button(label, key, bg)
     term.setCursorPos(x, h)
-    term.setBackgroundColor(color)
+    term.setBackgroundColor(color and bg or colors.white)
     term.setTextColor(colors.black)
     term.write(" " .. label .. " ")
-    buttons[#buttons + 1] = { x1 = x, x2 = x + #label + 1, y = h, action = action }
+    if not color then
+      local i = label:lower():find(key, 1, true)
+      if i then
+        term.setCursorPos(x + i, h)
+        term.setBackgroundColor(colors.black)
+        term.setTextColor(colors.white)
+        term.write(label:sub(i, i))
+      end
+    end
     x = x + #label + 3
     term.setBackgroundColor(colors.black)
   end
-  button(flags.paused and "Reprendre" or "Pause", colors.orange,
-         function() flags.paused = not flags.paused end)
-  button("Tournee", colors.lime, function() flags.runNow = true end)
-  button("Quitter", colors.red, function() flags.quit = true end)
+  for _, btn in ipairs(buttons) do button(btn.label(), btn.key, btn.bg) end
 end
 
 local function drawLoop()
@@ -521,13 +537,17 @@ local function eventLoop()
   while true do
     local ev, a, b, c = os.pullEvent()
     if ev == "mouse_click" then
+      local _, h = term.getSize()
+      local x = 1
       for _, btn in ipairs(buttons) do
-        if c == btn.y and b >= btn.x1 and b <= btn.x2 then btn.action() end
+        local w = #btn.label() + 2
+        if c == h and b >= x and b < x + w then btn.action() end
+        x = x + w + 1
       end
     elseif ev == "char" then
-      if a == "p" then flags.paused = not flags.paused
-      elseif a == "t" then flags.runNow = true
-      elseif a == "q" then flags.quit = true end
+      for _, btn in ipairs(buttons) do
+        if a == btn.key then btn.action() end
+      end
     end
   end
 end
