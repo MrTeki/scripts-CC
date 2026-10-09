@@ -852,40 +852,49 @@ end)
 -- Commandes pendant une attente
 -- ---------------------------------------------------------------------------
 
---- Simule un appui sur une touche dès que la turtle se met à attendre la
---- pousse (minuteur de growWait).
-local function pressDuringGrowth(key)
+--- Simule des événements -- touches, clics -- dès que la turtle se met à
+--- attendre la pousse (minuteur de growWait), une seule fois.
+local function pressDuringGrowth(...)
+	local evts = { ... }
 	local vraiTimer = os.startTimer
 	local pressed = false
 	os.startTimer = function(s)
 		local id = vraiTimer(s)
 		if s == 20 and not pressed then
 			pressed = true
-			os.queueEvent("char", key)
+			for _, e in ipairs(evts) do
+				if type(e) == "string" then e = { "char", e } end
+				os.queueEvent(table.unpack(e))
+			end
 		end
 		return id
 	end
 	return function() os.startTimer = vraiTimer end
 end
 
-H.case("RÉGRESSION : C bascule le charbon une seule fois, et tout de suite", function()
-	-- Constaté en jeu : en attente de pousse, la touche était vue par l'attente
-	-- de la machine ET par la coroutine d'interface. La première basculait
-	-- aussitôt, la seconde empilait une bascule appliquée au réveil suivant,
-	-- 20 s plus tard -- qui annulait la première.
-	terrain({ noTree = true })
+--- Pousse en attente devant l'origine, aucune pour la remplacer.
+local function waitingSapling(o)
+	terrain(o or { noTree = true })
 	mock.setBlock(1, 0, 0, SAPLING)
+end
+
+H.case("RÉGRESSION : une touche n'est comptée qu'une fois, et tout de suite", function()
+	-- Constaté en jeu avec l'ancien bouton CHARBON : en attente de pousse, la
+	-- touche était vue par l'attente de la machine ET par la coroutine
+	-- d'interface. La première basculait aussitôt, la seconde empilait une
+	-- bascule appliquée au réveil suivant, 20 s plus tard, qui l'annulait.
+	waitingSapling()
 	mock.setEventBudget(200)
-	local restore = pressDuringGrowth("c")
+	local restore = pressDuringGrowth("p")
 
 	runWaiting("1")
 	restore()
 
 	local log = mock.getFile("ccchop.log") or ""
-	local active = log:match("%[([%d%.]+)%] %S+ | Charbon de bois : active")
-	H.ok(active ~= nil, "le charbon est activé")
-	H.ok(tonumber(active) < 20, "sans attendre la fin de l'attente : " .. tostring(active))
-	H.ok(not log:find("Charbon de bois : desactive", 1, true), "et pas désactivé ensuite")
+	local paused = log:match("%[([%d%.]+)%] %S+ | En pause")
+	H.ok(paused ~= nil, "la turtle est en pause")
+	H.ok(tonumber(paused) < 20, "sans attendre la fin de l'attente : " .. tostring(paused))
+	H.ok(not log:find("Reprise", 1, true), "et elle ne reprend pas toute seule")
 end)
 
 H.case("STOP pendant une attente est pris en compte sans attendre son terme", function()
@@ -896,7 +905,11 @@ H.case("STOP pendant une attente est pris en compte sans attendre son terme", fu
 	local vraiTimer = os.startTimer
 	os.startTimer = function(s)
 		local id = vraiTimer(s)
-		if s >= 5 and s ~= 20 then os.queueEvent("char", "s") end
+		if s >= 5 and s ~= 20 then
+			-- Deux appuis : STOP demande confirmation.
+			os.queueEvent("char", "s")
+			os.queueEvent("char", "s")
+		end
 		return id
 	end
 
@@ -925,6 +938,7 @@ H.case("STOP en plein abattage interrompt l'arbre au lieu de le finir", function
 		coups = coups + 1
 		if coups == 3 then
 			os.queueEvent("char", "s")
+			os.queueEvent("char", "s")
 			os.queueEvent("ccmock_tick")
 			os.pullEvent("ccmock_tick")
 		end
@@ -940,4 +954,144 @@ H.case("STOP en plein abattage interrompt l'arbre au lieu de le finir", function
 	H.eq(t.z, 0, "la turtle est redescendue")
 	H.eq(t.x, 0, "et rentrée")
 	H.contains(mock.getFile("ccchop.log") or "", "interrompu (abort)", "le journal le dit")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Interface
+-- ---------------------------------------------------------------------------
+
+H.case("le tableau de bord affiche l'état, les jauges et les compteurs", function()
+	waitingSapling()
+	mock.setEventBudget(40)
+
+	runWaiting("1")     -- l'écran n'est pas effacé : l'attente ne finit pas
+
+	H.contains(mock.screenLine(1), "FERME A ARBRES", "bandeau")
+	H.contains(mock.screenLine(1), "POUSSE", "état de la pousse, avec compte à rebours")
+	H.contains(mock.screenLine(2), "Carburant", "jauge de carburant")
+	H.contains(mock.screenLine(2), "5000/2000", "niveau et cible")
+	H.contains(mock.screenLine(3), "libres", "jauge des slots")
+	H.contains(mock.screenLine(4), "Saplings", "compteurs")
+	H.contains(mock.screenLine(5), "Buches", "production")
+	H.contains(mock.screenLine(13), "OPTIONS", "boutons")
+	local line = mock.screenLine(13)
+	H.ok(line:find("OPTIONS", 1, true) < line:find("PAUSE", 1, true)
+		and line:find("PAUSE", 1, true) < line:find("STOP", 1, true), "OPTIONS, PAUSE, STOP : " .. line)
+	H.ok(not line:find("[", 1, true), "sans crochets")
+end)
+
+H.case("STOP demande une confirmation : un seul appui ne fait rien", function()
+	waitingSapling()
+	mock.setEventBudget(60)
+	local restore = pressDuringGrowth("s")
+
+	runWaiting("1")
+	restore()
+
+	H.ok(not (mock.getFile("ccchop.log") or ""):find("Arret demande", 1, true), "pas d'arrêt")
+end)
+
+H.case("STOP ? redevient STOP au bout de 3 s", function()
+	waitingSapling()
+	mock.setEventBudget(30)
+	local restore = pressDuringGrowth("s")
+
+	runWaiting("1")
+	restore()
+
+	local line = mock.screenLine(13)
+	H.ok(line:find("STOP", 1, true) and not line:find("STOP ?", 1, true), "confirmation expirée : " .. line)
+end)
+
+H.case("la page Options bascule le charbon, et le réglage est conservé", function()
+	-- Le .cfg n'est jamais réécrit, pour garder les commentaires de
+	-- l'utilisateur : le réglage va dans ccchopper.opts.
+	waitingSapling()
+	mock.setEventBudget(60)
+	local restore = pressDuringGrowth("o", { "key", keys.right })
+
+	runWaiting("1")
+	restore()
+
+	H.contains(mock.screenLine(1), "OPTIONS", "page Options affichée")
+	H.contains(mock.getFile("ccchop.log") or "", "Charbon de bois : oui", "réglage appliqué")
+	local saved = textutils.unserialize(mock.getFile("ccchopper.opts") or "")
+	H.ok(saved and saved.data and saved.data.makeCharcoal == true, "réglage conservé")
+end)
+
+H.case("la page Options règle la réserve de saplings au clavier", function()
+	waitingSapling()
+	mock.setEventBudget(60)
+	local restore = pressDuringGrowth("o", { "key", keys.down }, { "key", keys.down },
+		{ "key", keys.right }, { "key", keys.right })
+
+	runWaiting("1")
+	restore()
+
+	local saved = textutils.unserialize(mock.getFile("ccchopper.opts") or "")
+	H.eq(saved and saved.data and saved.data.saplingReserve, 6, "4 + 2")
+end)
+
+H.case("un clic sur une option la bascule", function()
+	waitingSapling()
+	mock.setEventBudget(60)
+	-- Ligne de « Poudre d'os » : la 2e option, en y = 5.
+	local restore = pressDuringGrowth("o", { "mouse_click", 1, 30, 5 })
+
+	runWaiting("1")
+	restore()
+
+	H.contains(mock.getFile("ccchop.log") or "", "Poudre d'os : non", "engrais désactivé")
+end)
+
+H.case("RETOUR ramène au tableau de bord", function()
+	waitingSapling()
+	mock.setEventBudget(60)
+	local restore = pressDuringGrowth("o", "r")
+
+	runWaiting("1")
+	restore()
+
+	H.contains(mock.screenLine(1), "FERME A ARBRES", "tableau de bord")
+end)
+
+H.case("les réglages de l'écran priment sur le fichier d'options", function()
+	terrainWithFurnace({ chestContents = {
+		[1] = { name = "minecraft:charcoal", count = 8 },
+		[2] = { name = LOG, count = 20 },
+	} })
+	mock.putFile("ccchopper.cfg", "return { makeCharcoal = false }")
+	mock.putFile("ccchopper.opts", textutils.serialize({ version = 1, data = { makeCharcoal = true } }))
+
+	run("1")
+
+	H.ok(furnaceSlots()[1] ~= nil, "le four est alimenté malgré le .cfg")
+	H.contains(mock.getFile("ccchop.log") or "", "Reglages de l'ecran repris", "le journal le dit")
+end)
+
+H.case("la production est comptée et conservée dans la sauvegarde", function()
+	terrain()
+	mock.setEventBudget(80)
+	-- Le premier arbre est abattu, puis la turtle attend la pousse du
+	-- suivant : la sauvegarde est encore là.
+	runWaiting("2")
+
+	local saved = textutils.unserialize(mock.getFile("ccchop.save") or "")
+	H.ok(saved and saved.data and saved.data.stats, "statistiques sauvegardées")
+	H.eq(saved.data.stats.logs, 4, "quatre bûches")
+	H.eq(saved.data.stats.fancy, 0, "un chêne de 4 n'est pas un grand chêne")
+	H.ok(saved.data.stats.since ~= nil, "date de départ")
+	H.contains(mock.getFile("ccchop.log") or "", "Arbre abattu : ", "durée journalisée")
+end)
+
+H.case("une colonne de 7 bûches ou plus compte comme un grand chêne", function()
+	terrain({ noTree = true })
+	for z = 0, 7 do mock.setBlock(1, 0, z, LOG) end
+	mock.setEventBudget(80)
+
+	runWaiting("2")
+
+	local saved = textutils.unserialize(mock.getFile("ccchop.save") or "")
+	H.eq(saved.data.stats.fancy, 1, "un grand chêne")
+	H.contains(mock.getFile("ccchop.log") or "", "grand chene", "le journal le dit")
 end)

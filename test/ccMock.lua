@@ -1053,6 +1053,8 @@ function M.install()
 			return nil
 		end,
 	}
+	-- Codes des touches utilisées par les pages à navigation au clavier.
+	_G.keys = { up = 200, down = 208, left = 203, right = 205, enter = 28, backspace = 14 }
 	_G.sleep = os_.sleep
 	_G.parallel = parallel_
 	_G.http = {

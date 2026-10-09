@@ -45,7 +45,7 @@ local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 -- planter le premier lancement sur une turtle neuve.
 local NEEDS = {
 	ccUtil = 1, ccVec = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
-	ccFuel = 2, ccSave = 1, ccUi = 1,
+	ccFuel = 2, ccSave = 1, ccUi = 2,
 }
 
 local args = { ... }
@@ -150,6 +150,11 @@ local DEFAULTS = {
 local CONFIG_TEMPLATE = [==[
 -- Options de ccChopper. Modifiable en jeu avec : edit ccchopper.cfg
 -- Supprimer ce fichier le regenere avec les valeurs par defaut.
+--
+-- Le charbon de bois, la poudre d'os et la reserve de saplings se reglent
+-- aussi sur la page OPTIONS de l'ecran. Ces reglages-la sont conserves dans
+-- ccchopper.opts et PRIMENT sur ce fichier : supprimer ccchopper.opts pour
+-- revenir aux valeurs ci-dessous.
 
 return {
     -- Alimenter un four voisin pour produire du charbon de bois. Le four doit
@@ -257,6 +262,11 @@ local ctx = {
 	logs = 0,            -- blocs cassés sur le dernier arbre
 	stopped = false,
 	pending = {},        -- commandes en attente, jamais exécutées à la réception
+	page = "dashboard",  -- page affichée : "dashboard" ou "options"
+
+	-- Production, conservée d'un lancement à l'autre. `since` date le premier
+	-- lancement, en temps réel : c'est la base des bûches par heure.
+	stats = { logs = 0, charcoal = 0, fancy = 0, since = nil },
 }
 
 local store
@@ -267,9 +277,11 @@ local store
 
 -- L'écran d'un turtle fait 13 lignes et se vide au premier nettoyage : un
 -- message d'erreur qui n'existe que là est perdu au moment où il sert.
-local function journal(msg)
+-- @param level  gravité, pour la couleur à l'écran : nil, "ok", "warn",
+--               "error" ou "dim" ; "file" n'écrit que dans le fichier
+local function journal(msg, level)
 	msg = tostring(msg)
-	pcall(ccUi.log, msg)
+	if level ~= "file" then pcall(ccUi.log, msg, level) end
 
 	local handle = fs.open(LOG_PATH, "a")
 	if not handle then return end
@@ -348,6 +360,7 @@ local function save()
 		reason = ctx.reason,
 		trees = ctx.trees,
 		target = ctx.target,
+		stats = ctx.stats,
 		pos = ccNav.position(),
 	})
 end
@@ -387,62 +400,317 @@ end
 -- ---------------------------------------------------------------------------
 -- Interface
 -- ---------------------------------------------------------------------------
+-- Deux pages sur l'écran de la turtle (39 x 13), ou sur un moniteur voisin :
+--
+--   tableau de bord   bandeau d'état, jauges, compteurs, journal, boutons
+--   options           réglages modifiables sans `edit`
+--
+-- Le bandeau porte l'état de la machine, dans une couleur qui se lit de loin :
+-- vert au travail, jaune pendant la pousse, orange quand la turtle réclame
+-- quelque chose, bleu en pause, rouge en erreur. Sur une turtle normale, sans
+-- couleur, ccUi rend tout cela en négatif.
+--
+-- Les textes affichés restent sans accents : la police de CC n'est pas en
+-- UTF-8, un « é » s'y afficherait en deux caractères parasites.
 
-local function setupUi()
-	ccUi.reset({ logLines = 1 })
-	ccUi.useMonitor()
-	ccUi.addButton({ label = "CHARBON", y = 1, cmd = "charcoal", key = "c" })
-	ccUi.addButton({ label = "PAUSE", y = 2, cmd = "pause" })
-	-- Pas de touche explicite : la première lettre, S, est celle que
-	-- l'écran met en évidence. L'ancien raccourci, x, n'apparaissait pas dans
-	-- le libellé ; ccUi surlignait donc le S, qui ne faisait rien.
-	ccUi.addButton({ label = "STOP", y = 3, cmd = "abort" })
-	ccUi.clear()
+local LOG_TOP = 7
+
+-- Réglages exposés sur la page Options. Ils sont conservés dans OPTS_PATH,
+-- qui prend le pas sur ccchopper.cfg : ccConfig n'écrit jamais dans le .cfg,
+-- pour ne pas écraser les commentaires de l'utilisateur.
+local OPTS_PATH = "ccchopper.opts"
+local OPTIONS = {
+	{ key = "makeCharcoal", label = "Charbon de bois" },
+	{ key = "fertilize", label = "Poudre d'os" },
+	{ key = "saplingReserve", label = "Reserve de saplings", min = 0, max = 64 },
+}
+local optsStore
+
+local STATE_COLORS = {
+	[S.CALIBRATE] = colors.green,
+	[S.TEND]      = colors.green,
+	[S.CHOP]      = colors.green,
+	[S.RETURN]    = colors.green,
+	[S.SERVICE]   = colors.green,
+	[S.AWAIT]     = colors.orange,
+	[S.PAUSED]    = colors.lightBlue,
+	[S.DONE]      = colors.lightGray,
+	[S.FAILED]    = colors.red,
+}
+
+--- Objets à bord satisfaisant `accept`.
+local function onBoard(accept)
+	local n = 0
+	for slot = 1, 16 do
+		local d = ccInv.detail(slot)
+		if d and accept(d.name) then n = n + d.count end
+	end
+	return n
+end
+
+--- Texte de droite du bandeau : l'état, et ce qu'on attend s'il y a lieu.
+local function stateText()
+	if ctx.state == S.TEND and ctx.waitUntil then
+		return ("POUSSE %ds"):format(math.max(0, math.ceil(ctx.waitUntil - os.clock())))
+	end
+	if ctx.state == S.AWAIT and ctx.need then return "ATTENTE " .. ctx.need end
+	return ctx.state
+end
+
+local function bannerColor()
+	if ctx.state == S.TEND and ctx.waitUntil then return colors.yellow end
+	return STATE_COLORS[ctx.state] or colors.gray
+end
+
+--- Bûches par heure depuis le premier lancement, une fois dix minutes de
+--- recul : avant, le chiffre ne veut rien dire.
+local function rate()
+	local elapsed = os.epoch("utc") - (ctx.stats.since or os.epoch("utc"))
+	if elapsed < 600000 then return nil end
+	return math.floor(ctx.stats.logs * 3600000 / elapsed + 0.5)
+end
+
+local function drawDashboard()
+	local w, h = ccUi.size()
+	ccUi.banner(1, "FERME A ARBRES", stateText(), bannerColor())
+
+	local fuel = ccFuel.level()
+	if ccFuel.isUnlimited() then
+		ccUi.gauge({ y = 2, label = "Carburant", labelWidth = 9, current = 1, max = 1,
+			text = "illimite", textWidth = 9 })
+	else
+		ccUi.gauge({ y = 2, label = "Carburant", labelWidth = 9,
+			current = fuel, max = CONFIG.fuelTopUp,
+			text = ("%d/%d"):format(fuel, CONFIG.fuelTopUp), textWidth = 9,
+			color = fuel < 2 * CONFIG.fuelMargin and colors.orange or colors.lime })
+	end
+
+	local free = ccInv.freeCount()
+	ccUi.gauge({ y = 3, label = "Slots", labelWidth = 9, current = 16 - free, max = 16,
+		text = free .. " libres", textWidth = 9,
+		color = free <= CONFIG.spareSlots and colors.red
+			or free <= CONFIG.spareSlots + 2 and colors.yellow or colors.lime })
+
+	local saplings = onBoard(isSapling)
+	ccUi.fill(4)
+	ccUi.write(2, 4, "Saplings", colors.lightGray)
+	ccUi.write(11, 4, tostring(saplings),
+		saplings < CONFIG.saplingReserve and colors.orange or colors.white)
+	ccUi.write(16, 4, "Os", colors.lightGray)
+	ccUi.write(19, 4, tostring(onBoard(function(n) return n == "minecraft:bone_meal" end)))
+	ccUi.write(25, 4, "Arbres", colors.lightGray)
+	ccUi.write(32, 4, tostring(ctx.trees) .. (ctx.target and ("/" .. ctx.target) or ""))
+
+	-- Le compteur de charbon est grisé quand le four est arrêté : l'état des
+	-- réglages reste visible sans passer par la page Options.
+	local r = rate()
+	ccUi.fill(5)
+	ccUi.write(2, 5, "Buches", colors.lightGray)
+	ccUi.write(9, 5, tostring(ctx.stats.logs))
+	ccUi.write(16, 5, "Charbon", colors.lightGray)
+	ccUi.write(24, 5, tostring(ctx.stats.charcoal),
+		CONFIG.makeCharcoal and colors.white or colors.gray)
+	local perHour = r and ("~" .. r .. "/h") or "--/h"
+	ccUi.write(w - #perHour, 5, perHour, colors.lightGray)
+
+	ccUi.rule(6)
+	ccUi.drawLog()
+	ccUi.rule(h - 1)
+	ccUi.fill(h)
+	ccUi.drawButtons()
+end
+
+--- Valeur affichée d'une option.
+local function optionText(opt)
+	local v = CONFIG[opt.key]
+	if type(v) == "boolean" then return v and "oui" or "non" end
+	return ("- %2d +"):format(v)
+end
+
+--- Ligne d'écran d'une option.
+local function optionRow(i) return 1 + 2 * i end
+
+local function drawOptions()
+	local w, h = ccUi.size()
+	ccUi.banner(1, "OPTIONS", stateText(), bannerColor())
+	for y = 2, h - 1 do ccUi.fill(y) end
+
+	for i, opt in ipairs(OPTIONS) do
+		local y = optionRow(i)
+		local selected = i == ctx.optSel
+		local bg = selected and colors.gray or nil
+		if selected then ccUi.fill(y, bg) end
+		ccUi.write(2, y, opt.label, colors.white, bg)
+		local value = optionText(opt)
+		ccUi.write(w - #value, y, value,
+			type(CONFIG[opt.key]) == "boolean" and (CONFIG[opt.key] and colors.lime or colors.orange)
+			or colors.white, bg)
+	end
+
+	ccUi.write(2, h - 2, "Fleches : choisir et modifier", colors.lightGray)
+	ccUi.rule(h - 1)
+	ccUi.fill(h)
+	ccUi.drawButtons()
 end
 
 local function draw()
-	local pos = ccNav.position()
+	-- La confirmation de STOP expire au bout de 3 s.
+	if ctx.confirmUntil and os.clock() > ctx.confirmUntil then
+		ctx.confirmUntil = nil
+		ccUi.setButton("abort", { label = "STOP" })
+	end
+	ccUi.frame(function()
+		if ctx.page == "options" then drawOptions() else drawDashboard() end
+	end)
+end
 
-	ccUi.line(1, "Ferme a arbres")
-	ccUi.line(3, ("Arbres : %d%s")
-		:format(ctx.trees, ctx.target and (" / " .. ctx.target) or ""))
-	ccUi.line(4, ("Carburant : %s")
-		:format(ccFuel.isUnlimited() and "illimite" or ccFuel.level()))
-	ccUi.line(5, "Reserve : " .. ccFuel.reserve(pos, nil, CONFIG.fuelMargin))
-	ccUi.line(6, "Position : " .. ccVec.tostring(pos))
-	ccUi.line(7, "Slots libres : " .. ccInv.freeCount())
-	ccUi.line(8, "Charbon de bois : " .. (CONFIG.makeCharcoal and "oui" or "non"))
-	ccUi.line(9, "Etat : " .. ctx.state .. (ctx.reason and (" (" .. ctx.reason .. ")") or ""))
-	ccUi.drawButtons()
+--- Boutons et zone de journal de la page demandée.
+local function showPage(page)
+	local _, h = ccUi.size()
+	ctx.page = page
+	ccUi.clearButtons()
+	if page == "options" then
+		ctx.optSel = ctx.optSel or 1
+		-- Le journal est masqué : il dessinerait par-dessus les options.
+		ccUi.configure({ logLines = 0 })
+		ccUi.addButton({ label = "RETOUR", y = h, cmd = "back", bg = colors.lightBlue, row = true })
+	else
+		ccUi.configure({ logLines = h - LOG_TOP - 1 })
+		ccUi.addButton({ label = "OPTIONS", y = h, cmd = "options", bg = colors.lightBlue, row = true })
+		ccUi.addButton({ label = "PAUSE", y = h, cmd = "pause", bg = colors.yellow, row = true })
+		-- Pas de touche explicite : la première lettre, S, est celle que
+		-- l'écran met en évidence. L'ancien raccourci, x, n'apparaissait pas dans
+		-- le libellé ; ccUi surlignait donc le S, qui ne faisait rien.
+		ccUi.addButton({ label = "STOP", y = h, cmd = "abort", bg = colors.red, row = true })
+	end
+end
+
+local function setupUi()
+	ccUi.reset({ logTop = LOG_TOP, logKeep = 50, logX = 2 })
+	ccUi.useMonitor()
+	ccUi.buffered()
+	showPage("dashboard")
+	ccUi.clear()
+end
+
+--- Réglages faits à l'écran, relus au démarrage.
+local function loadOptions()
+	optsStore = ccSave.store(OPTS_PATH, { version = 1 })
+	local saved = optsStore.read()
+	if type(saved) ~= "table" then return 0 end
+	local n = 0
+	for _, opt in ipairs(OPTIONS) do
+		local v = saved[opt.key]
+		if v ~= nil and type(v) == type(DEFAULTS[opt.key]) then
+			CONFIG[opt.key] = v
+			n = n + 1
+		end
+	end
+	return n
+end
+
+local function saveOptions()
+	local data = {}
+	for _, opt in ipairs(OPTIONS) do data[opt.key] = CONFIG[opt.key] end
+	if optsStore then optsStore.write(data) end
 end
 
 -- ---------------------------------------------------------------------------
 -- Commandes
 -- ---------------------------------------------------------------------------
 
--- Les commandes sont COLLECTÉES ici et CONSOMMÉES entre deux transitions.
--- L'ancienne version basculait makeCharcoal depuis la coroutine d'événements,
--- en pleine opération de la boucle principale.
+-- Les commandes sont COLLECTÉES ici et CONSOMMÉES entre deux transitions :
+-- ce qui touche à la turtle ou aux réglages ne s'exécute jamais en pleine
+-- opération de la machine.
 --
 -- C'est le SEUL endroit où une touche devient une commande. Sous parallel,
 -- chaque coroutine reçoit chaque événement : quand l'attente de la machine
--- traduisait aussi les touches, un appui sur C était compté deux fois -- une
+-- traduisait aussi les touches, un appui était compté deux fois -- une
 -- bascule immédiate, puis une seconde au réveil suivant, qui l'annulait.
 -- Pour que la machine réagisse sans attendre la fin de son minuteur, elle est
 -- réveillée par un événement dédié.
+--
+-- Changer de page, faire défiler le journal ou armer la confirmation de STOP
+-- n'est que de l'affichage : c'est traité ici même.
 local CMD_EVENT = "ccchopper_cmd"
+
+local function push(cmd)
+	ctx.pending[#ctx.pending + 1] = cmd
+	os.queueEvent(CMD_EVENT)
+end
+
+--- Modifie l'option sélectionnée : `delta` ajuste un nombre, ou bascule un
+--- booléen quel que soit son signe.
+local function adjust(i, delta)
+	local opt = OPTIONS[i]
+	if opt then push(("opt:%s:%d"):format(opt.key, delta)) end
+end
+
+--- Clic sur la page Options.
+local function clickOptions(x, y)
+	local w = ccUi.size()
+	for i, opt in ipairs(OPTIONS) do
+		if y == optionRow(i) then
+			ctx.optSel = i
+			if type(CONFIG[opt.key]) == "boolean" then
+				adjust(i, 1)
+			elseif x <= w - 5 and x >= w - 7 then
+				adjust(i, -1)
+			elseif x >= w - 2 then
+				adjust(i, 1)
+			end
+			return true
+		end
+	end
+	return false
+end
+
+local function onKeyOptions(key)
+	local K = keys or {}
+	if key == K.up then
+		ctx.optSel = math.max(1, (ctx.optSel or 1) - 1)
+	elseif key == K.down then
+		ctx.optSel = math.min(#OPTIONS, (ctx.optSel or 1) + 1)
+	elseif key == K.left then
+		adjust(ctx.optSel, -1)
+	elseif key == K.right or key == K.enter then
+		adjust(ctx.optSel, 1)
+	elseif key == K.backspace then
+		showPage("dashboard")
+	end
+end
 
 local function collect()
 	local e = { waitEvent() }
 	if ctx.stopped then return end
 
 	local name = e[1]
-	if name == "char" or name == "mouse_click" or name == "monitor_touch" then
+	if name == "char" or name == "mouse_click" or name == "monitor_touch"
+		or name == "mouse_scroll" then
 		local cmd = ccUi.dispatch(table.unpack(e))
-		if cmd then
-			ctx.pending[#ctx.pending + 1] = cmd
-			os.queueEvent(CMD_EVENT)
+		if cmd == "options" then
+			showPage("options")
+		elseif cmd == "back" then
+			showPage("dashboard")
+		elseif cmd == "abort" then
+			-- Deux appuis en 3 s : un STOP accidentel coûterait la sauvegarde
+			-- et le startup.
+			if ctx.confirmUntil and os.clock() <= ctx.confirmUntil then
+				ctx.confirmUntil = nil
+				ccUi.setButton("abort", { label = "STOP" })
+				push("abort")
+			else
+				ctx.confirmUntil = os.clock() + 3
+				ccUi.setButton("abort", { label = "STOP ?" })
+			end
+		elseif cmd then
+			push(cmd)
+		elseif ctx.page == "options" and (name == "mouse_click" or name == "monitor_touch") then
+			clickOptions(e[3], e[4])
 		end
+		draw()
+	elseif name == "key" and ctx.page == "options" then
+		onKeyOptions(e[2])
 		draw()
 	elseif name == "timer" and e[2] == ctx.drawTimer then
 		ctx.drawTimer = os.startTimer(0.5)
@@ -450,13 +718,32 @@ local function collect()
 	end
 end
 
+--- Applique un changement d'option demandé à l'écran, et le conserve.
+local function applyOption(key, delta)
+	for _, opt in ipairs(OPTIONS) do
+		if opt.key == key then
+			local v = CONFIG[key]
+			if type(v) == "boolean" then
+				CONFIG[key] = not v
+			else
+				CONFIG[key] = math.max(opt.min or 0, math.min(opt.max or 64, v + delta))
+			end
+			saveOptions()
+			local shown = CONFIG[key]
+			if type(shown) == "boolean" then shown = shown and "oui" or "non" end
+			journal(("%s : %s"):format(opt.label, tostring(shown)))
+			return
+		end
+	end
+end
+
 local function applyCommands()
 	while #ctx.pending > 0 do
 		local cmd = table.remove(ctx.pending, 1)
 
-		if cmd == "charcoal" then
-			CONFIG.makeCharcoal = not CONFIG.makeCharcoal
-			journal("Charbon de bois : " .. (CONFIG.makeCharcoal and "active" or "desactive"))
+		local optKey, optDelta = cmd:match("^opt:(%w+):(%-?%d+)$")
+		if optKey then
+			applyOption(optKey, tonumber(optDelta))
 
 		elseif cmd == "pause" or cmd == "resume" then
 			if ctx.state == S.PAUSED then
@@ -472,7 +759,7 @@ local function applyCommands()
 			ctx.reason = "abort"
 			ctx.abort = true
 			ctx.state = S.RETURN
-			journal("Arret demande")
+			journal("Arret demande", "warn")
 		end
 	end
 end
@@ -532,6 +819,7 @@ local function clearTree(where)
 		-- borne creuserait aussi ce qui retombe derrière, sans le regarder.
 		if not ccNav.dig(where, { maxDig = 1 }) then return false end
 		ctx.logs = ctx.logs + 1
+		if isWood(name) then ctx.stats.logs = ctx.stats.logs + 1 end
 	end
 	if blockAt(where) ~= nil then return false end
 	if ctx.seen then ctx.seen[cellKey(cellAt(where))] = false end
@@ -999,6 +1287,7 @@ local function collectFurnace(dev)
 	for _ = 1, 8 do
 		local ok, moved = pcall(dev.furnace.pushItems, dev.chestSide, 3)
 		if not ok or not moved or moved == 0 then break end
+		ctx.stats.charcoal = ctx.stats.charcoal + moved
 	end
 end
 
@@ -1275,7 +1564,8 @@ STATES[S.TEND] = function()
 		local placed = turtle.place()
 		ccInv.selectForMining()
 		if not placed then
-			journal("Plantation impossible : sol inadapte ?")
+			journal("Plantation impossible : sol inadapte ?", "warn")
+			ctx.need = "plantation"
 			ctx.afterWait = S.TEND
 			return S.AWAIT
 		end
@@ -1313,18 +1603,22 @@ STATES[S.TEND] = function()
 		--
 		-- Une commande reçue pendant l'attente l'interrompt : collect() la
 		-- traduit et réveille la machine, qui l'applique au tour suivant.
-		local timer = os.startTimer(fertilized and CONFIG.fertilizeWait or CONFIG.growWait)
+		local delay = fertilized and CONFIG.fertilizeWait or CONFIG.growWait
+		local timer = os.startTimer(delay)
+		ctx.waitUntil = os.clock() + delay
 		while true do
 			local event, id = waitEvent()
-			if ctx.stopped then return S.TEND end
+			if ctx.stopped then ctx.waitUntil = nil return S.TEND end
 			if event == "timer" and id == timer then break end
 			if event == CMD_EVENT or #ctx.pending > 0 then break end
 		end
+		ctx.waitUntil = nil
 		return S.TEND
 	end
 
 	-- Autre chose devant : ni bois, ni pousse, ni air.
-	journal("Bloc inattendu devant l'origine : " .. tostring(name))
+	journal("Bloc inattendu devant l'origine : " .. tostring(name), "warn")
+	ctx.need = "bloc"
 	ctx.afterWait = S.TEND
 	return S.AWAIT
 end
@@ -1340,7 +1634,7 @@ STATES[S.CHOP] = function()
 	local blocked = chopStop()
 	if blocked then
 		ctx.reason = blocked
-		journal("Abattage differe : " .. blocked)
+		journal("Abattage differe : " .. blocked, "warn")
 		return S.RETURN
 	end
 
@@ -1350,25 +1644,38 @@ STATES[S.CHOP] = function()
 	ctx.seen, ctx.wasWood = {}, {}
 
 	local base = ccNav.position()
+	local started = os.clock()
 
 	if not clearTree("forward") then
-		journal("Tronc inaccessible")
+		journal("Tronc inaccessible", "warn")
 		return S.RETURN
 	end
 	if not ccNav.forward({ dig = false }) then
-		journal("Entree dans le tronc impossible")
+		journal("Entree dans le tronc impossible", "warn")
 		return S.RETURN
 	end
 
 	chopHere(1, true)
 	stepBackTo(base)
+
+	-- Une colonne de 7 bûches ou plus ne peut venir que d'un grand chêne : un
+	-- chêne ordinaire en a 4 à 6 (StraightTrunkPlacer(4, 2, 0)).
+	local column = 1
+	while ctx.wasWood[cellKey({ x = TREE.x, y = TREE.y, z = TREE.z + column })] do
+		column = column + 1
+	end
+	local fancy = column >= 7
+	if fancy then ctx.stats.fancy = ctx.stats.fancy + 1 end
 	ctx.seen, ctx.wasWood = nil, nil
 
 	local stop = chopStop()
 	ctx.trees = ctx.trees + 1
-	journal(("Arbre abattu : %d blocs%s%s")
-		:format(ctx.logs, ctx.shave and ", canopee rasee" or "",
-		        stop and (", interrompu (" .. stop .. ")") or ""))
+	journal(("Arbre abattu : %d blocs, %d s%s%s%s")
+		:format(ctx.logs, math.floor(os.clock() - started + 0.5),
+		        fancy and ", grand chene" or "",
+		        ctx.shave and ", canopee rasee" or "",
+		        stop and (", interrompu (" .. stop .. ")") or ""),
+		stop and "warn" or "ok")
 
 	ctx.reason = stop or "arbre"
 	return S.RETURN
@@ -1396,7 +1703,7 @@ STATES[S.RETURN] = function()
 	-- chaque pas plutôt qu'en visant d'emblée le plafond : sortir du feuillage
 	-- suffit presque toujours, et grimper 40 blocs coûterait 80 mouvements pour
 	-- rien.
-	journal("Retour direct impossible, passage par au-dessus")
+	journal("Retour direct impossible, passage par au-dessus", "warn")
 	while ccNav.position().z < CONFIG.maxHeight do
 		if not stepTo("up") then break end
 		if ccNav.goTo({ x = 0, y = 0, z = ccNav.position().z }, { dig = false }) then
@@ -1405,13 +1712,13 @@ STATES[S.RETURN] = function()
 	end
 
 	if ccNav.position().x ~= 0 or ccNav.position().y ~= 0 then
-		journal("Trajet de secours bloque")
+		journal("Trajet de secours bloque", "error")
 		return S.FAILED
 	end
 
 	while ccNav.position().z > 0 do
 		if not stepTo("down") then
-			journal("Descente sur l'origine bloquee")
+			journal("Descente sur l'origine bloquee", "error")
 			return S.FAILED
 		end
 	end
@@ -1441,7 +1748,7 @@ STATES[S.SERVICE] = function()
 		if CONFIG.makeCharcoal then
 			local why
 			furnace, why = openFurnace(where)
-			if furnace then collectFurnace(furnace) else journal("Four : " .. why) end
+			if furnace then collectFurnace(furnace) else journal("Four : " .. why, "warn") end
 		end
 
 		refuel(where)
@@ -1462,7 +1769,7 @@ STATES[S.SERVICE] = function()
 
 		if furnace then
 			local fine, reason = feedFurnace(furnace)
-			if not fine then journal("Four : " .. tostring(reason)) end
+			if not fine then journal("Four : " .. tostring(reason), "warn") end
 		end
 
 		ccInv.tidy(fuelSlotForTidy())
@@ -1480,7 +1787,8 @@ STATES[S.SERVICE] = function()
 	-- L'arrêt sur compte atteint appartient à PLANTATION, qui replante d'abord.
 	-- On ne repart QUE si les conditions du retour sont levées.
 	if ccInv.freeCount() <= CONFIG.spareSlots then
-		journal("Inventaire plein : vider la turtle ou lui donner un conteneur")
+		journal("Inventaire plein : vider la turtle ou lui donner un conteneur", "warn")
+		ctx.need = "inventaire"
 		ctx.afterWait = S.SERVICE
 		return S.AWAIT
 	end
@@ -1488,12 +1796,14 @@ STATES[S.SERVICE] = function()
 	-- adulte qui attend d'être abattu n'en demande pas : l'exiger bloquait la
 	-- turtle en attente devant l'arbre même qui allait lui en fournir.
 	if blockAt("forward") == nil and not findSapling() then
-		journal("Plus de sapling : en mettre dans le conteneur")
+		journal("Plus de sapling : en mettre dans le conteneur", "warn")
+		ctx.need = "saplings"
 		ctx.afterWait = S.SERVICE
 		return S.AWAIT
 	end
 	if ccFuel.level() <= ccFuel.reserve(TREE, nil, CONFIG.fuelMargin) then
-		journal("Carburant insuffisant : en fournir a la turtle")
+		journal("Carburant insuffisant : en fournir a la turtle", "warn")
+		ctx.need = "carburant"
 		ctx.afterWait = S.SERVICE
 		return S.AWAIT
 	end
@@ -1588,6 +1898,9 @@ local function setup(a)
 	if saved and saved.pos then
 		ccNav.setPosition(saved.pos)
 		ctx.trees = saved.trees or 0
+		if type(saved.stats) == "table" then
+			for k, v in pairs(saved.stats) do ctx.stats[k] = v end
+		end
 		if ctx.target == nil then ctx.target = saved.target end
 		ctx.state = S.CALIBRATE
 		if saved.state == S.CHOP or saved.state == S.RETURN then
@@ -1625,7 +1938,7 @@ local function machine()
 		local ok, result = pcall(fn)
 		if not ok then
 			ctx.error = tostring(result)
-			journal("Erreur en " .. before .. " : " .. ctx.error)
+			journal("Erreur en " .. before .. " : " .. ctx.error, "error")
 			ctx.state = S.FAILED
 		elseif result == nil then
 			ctx.error = "l'etat " .. before .. " n'a renvoye aucun etat suivant"
@@ -1636,7 +1949,9 @@ local function machine()
 		end
 
 		if ctx.state ~= before and ctx.state ~= S.DONE and ctx.state ~= S.FAILED then
-			journal(ctx.state)
+			-- Fichier seulement : le bandeau montre déjà l'état, et ces
+			-- lignes chassaient de l'écran les messages utiles.
+			journal(ctx.state, "file")
 			save()
 		end
 		draw()
@@ -1656,6 +1971,8 @@ end
 -- donc de ce que la turtle casse dès le premier mouvement.
 local configWarnings, configCreated
 CONFIG, configWarnings, configCreated = ccConfig.load(CONFIG_PATH, DEFAULTS, CONFIG_TEMPLATE)
+-- Les réglages faits sur la page Options priment sur le fichier.
+local screenOptions = loadOptions()
 
 ccNav.reset()
 ccInv.reset({
@@ -1674,7 +1991,9 @@ setupUi()
 ctx.drawTimer = os.startTimer(0.5)
 
 if configCreated then journal("Options creees : " .. CONFIG_PATH) end
-for _, w in ipairs(configWarnings) do journal("Options : " .. w) end
+for _, w in ipairs(configWarnings) do journal("Options : " .. w, "warn") end
+if screenOptions > 0 then journal("Reglages de l'ecran repris depuis " .. OPTS_PATH) end
+ctx.stats.since = ctx.stats.since or os.epoch("utc")
 journal(("Rasage sous %d saplings, charbon : %s")
 	:format(CONFIG.saplingReserve,
 	        CONFIG.makeCharcoal and "oui" or "non"))
