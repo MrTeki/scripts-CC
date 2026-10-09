@@ -1471,29 +1471,102 @@ local function findSapling()
 	return nil
 end
 
---- Prend des saplings dans le conteneur, quand il n'en reste plus à bord.
+--- Prend des saplings dans le conteneur, jusqu'à keepSaplings à bord.
 --
--- L'ancienne version avait la place de ce code, un commentaire décrivant ce
--- qu'il devait faire, et à l'endroit de l'appel une COPIE de la recherche en
--- inventaire, dont le résultat était jeté. Faute de sapling, le script
--- s'arrêtait au lieu d'aller en chercher.
+-- turtle.suck() ne prend que la PREMIÈRE pile d'un conteneur. Or chaque
+-- service y dépose la récolte : les bûches occupent l'avant du coffre, et les
+-- saplings que l'utilisateur y a mis se retrouvent derrière. La version
+-- précédente n'essayait que la première pile, la rendait si ce n'était pas un
+-- sapling, et concluait qu'il n'y en avait pas. Constaté en jeu : la turtle
+-- réclamait des saplings devant un coffre qui en contenait.
+--
+-- L'API peripheral voit TOUT le coffre : on sait s'il y a des saplings, et à
+-- quel slot. Pour les amener à portée de turtle.suck(), deux moyens :
+--   1. ranger le coffre : le conteneur déplace lui-même la pile en tête
+--      (pushItems vers son propre nom), en libérant la tête au besoin ;
+--   2. à défaut, emprunter les piles qui la précèdent, prendre les saplings,
+--      puis rendre ces piles -- elles reprennent les places de tête.
+-- @return "ok", "none" (aucun sapling au coffre) ou "unreachable"
 local function fetchSaplings(where)
-	local before = ccInv.freeCount()
-	if before == 0 then return false end
+	local want = CONFIG.keepSaplings - saplingCount()
+	if want <= 0 then return "ok" end
+	if ccInv.freeCount() == 0 then return "unreachable" end
 
-	for _ = 1, 4 do
+	local side = SIDES[where]
+	local okWrap, chest = pcall(peripheral.wrap, side or "")
+	if not side or not okWrap or not chest or not chest.list then
+		-- Sans API peripheral : la première pile seulement.
 		local slot = ccInv.firstFree()
-		if not slot then break end
-		if not ccInv.suckFrom(where, slot) then break end
+		if ccInv.suckFrom(where, slot, want) then
+			local d = ccInv.detail(slot)
+			if d and isSapling(d.name) then return "ok" end
+			ccInv.dropTo(where, slot)
+		end
+		return "none"
+	end
 
+	--- Contenu du coffre : table par slot, et slots occupés dans l'ordre.
+	local function scan()
+		local ok, list = pcall(chest.list)
+		if not ok or type(list) ~= "table" then return {}, {} end
+		local used = {}
+		for slot in pairs(list) do used[#used + 1] = slot end
+		table.sort(used)
+		return list, used
+	end
+
+	local list, used = scan()
+	local target, position
+	for i, slot in ipairs(used) do
+		if isSapling(list[slot].name) then target, position = slot, i break end
+	end
+	if not target then return "none" end
+
+	-- 1. Ranger le coffre pour mettre les saplings en tête.
+	if position > 1 then
+		local okSize, size = pcall(chest.size)
+		if not okSize or type(size) ~= "number" then size = 27 end
+		local empty
+		for i = 1, size do
+			if not list[i] then empty = i break end
+		end
+		if list[1] and empty then pcall(chest.pushItems, side, 1, 64, empty) end
+		pcall(chest.pushItems, side, target, 64, 1)
+		list, used = scan()
+	end
+
+	local function takeFront()
+		local slot = ccInv.firstFree()
+		if not slot or not ccInv.suckFrom(where, slot, want) then return false end
 		local d = ccInv.detail(slot)
 		if d and isSapling(d.name) then return true end
-		-- Ce n'est pas un sapling : on le rend et on s'arrête là. Insister
-		-- viderait le conteneur pile par pile dans la turtle.
 		ccInv.dropTo(where, slot)
-		break
+		return false
 	end
-	return false
+
+	if used[1] and isSapling(list[used[1]].name) then
+		ccInv.selectForMining()
+		return takeFront() and "ok" or "unreachable"
+	end
+
+	-- 2. Emprunter les piles qui précèdent. Il faut de la place pour elles
+	-- ET pour les saplings.
+	position = nil
+	for i, slot in ipairs(used) do
+		if isSapling(list[slot].name) then position = i break end
+	end
+	if not position or position > ccInv.freeCount() then return "unreachable" end
+
+	local borrowed = {}
+	for _ = 1, position - 1 do
+		local slot = ccInv.firstFree()
+		if not slot or not ccInv.suckFrom(where, slot) then break end
+		borrowed[#borrowed + 1] = slot
+	end
+	local got = takeFront()
+	for _, slot in ipairs(borrowed) do ccInv.dropTo(where, slot) end
+	ccInv.selectForMining()
+	return got and "ok" or "unreachable"
 end
 
 --- Ravitaillement au service, en deux étages.
@@ -1765,7 +1838,12 @@ STATES[S.SERVICE] = function()
 			})
 		end
 
-		if not findSapling() then fetchSaplings(where) end
+		-- Réapprovisionnement dès que le stock passe sous la réserve, et pas
+		-- seulement à zéro : c'est aussi ce qui évite de raser la canopée
+		-- quand le coffre a de quoi replanter.
+		if saplingCount() < CONFIG.saplingReserve then
+			ctx.saplingFetch = fetchSaplings(where)
+		end
 
 		if furnace then
 			local fine, reason = feedFurnace(furnace)
@@ -1796,7 +1874,11 @@ STATES[S.SERVICE] = function()
 	-- adulte qui attend d'être abattu n'en demande pas : l'exiger bloquait la
 	-- turtle en attente devant l'arbre même qui allait lui en fournir.
 	if blockAt("forward") == nil and not findSapling() then
-		journal("Plus de sapling : en mettre dans le conteneur", "warn")
+		if ctx.saplingFetch == "unreachable" then
+			journal("Saplings au coffre hors de portee : liberer l'avant du coffre", "warn")
+		else
+			journal("Plus de sapling : en mettre dans le conteneur", "warn")
+		end
 		ctx.need = "saplings"
 		ctx.afterWait = S.SERVICE
 		return S.AWAIT

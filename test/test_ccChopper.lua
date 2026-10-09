@@ -1095,3 +1095,92 @@ H.case("une colonne de 7 bûches ou plus compte comme un grand chêne", function
 	H.eq(saved.data.stats.fancy, 1, "un grand chêne")
 	H.contains(mock.getFile("ccchop.log") or "", "grand chene", "le journal le dit")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Saplings au coffre
+-- ---------------------------------------------------------------------------
+
+local function saplingsOnBoard()
+	local n = 0
+	for slot = 1, 16 do
+		local d = turtle.getItemDetail(slot)
+		if d and d.name == SAPLING then n = n + d.count end
+	end
+	return n
+end
+
+--- Le conteneur refuse de se ranger lui-même : pushItems vers son propre
+--- nom ne déplace rien. C'est le cas à prévoir si le jeu ne le permet pas.
+local function noSelfPush()
+	local real = peripheral.wrap
+	peripheral.wrap = function(side)
+		local api = real(side)
+		if type(api) ~= "table" or not api.pushItems then return api end
+		local copy = setmetatable({}, { __index = api })
+		copy.pushItems = function(to, ...)
+			if to == side then return 0 end
+			return api.pushItems(to, ...)
+		end
+		return copy
+	end
+	return function() peripheral.wrap = real end
+end
+
+H.case("RÉGRESSION : des saplings derrière les bûches du coffre sont trouvés", function()
+	-- Constaté en jeu : turtle.suck() ne prend que la première pile, et la
+	-- récolte déposée occupe l'avant du coffre. La turtle réclamait des
+	-- saplings devant un coffre qui en contenait.
+	terrain({ saplings = 0, chestContents = {
+		[1] = { name = LOG, count = 64 },
+		[2] = { name = LOG, count = 64 },
+		[3] = { name = SAPLING, count = 16 },
+	} })
+
+	run("1")
+
+	H.eq(mock.getBlock(1, 0, 0) and mock.getBlock(1, 0, 0).name, SAPLING, "replanté")
+end)
+
+H.case("sans rangement possible, les piles de tête sont empruntées puis rendues", function()
+	terrain({ saplings = 0, chestContents = {
+		[1] = { name = LOG, count = 64 },
+		[2] = { name = LOG, count = 64 },
+		[3] = { name = SAPLING, count = 16 },
+	} })
+	local restore = noSelfPush()
+
+	local ok, err = pcall(run, "1")
+	restore()
+	H.ok(ok, tostring(err))
+
+	H.eq(mock.getBlock(1, 0, 0) and mock.getBlock(1, 0, 0).name, SAPLING, "replanté")
+	H.eq(chestSummary()[LOG], 132, "toutes les bûches sont rendues au coffre")
+	H.eq(mock.getBlock(-1, 0, 0).inventory[1].name, LOG, "et reprennent la tête")
+end)
+
+H.case("des saplings vraiment hors de portée sont signalés comme tels", function()
+	-- Coffre plein, saplings tout au fond : ni rangement ni emprunt possible.
+	-- Le message doit dire quoi faire, pas « plus de sapling ».
+	local contents = {}
+	for i = 1, 26 do contents[i] = { name = LOG, count = 64 } end
+	contents[27] = { name = SAPLING, count = 16 }
+	terrain({ saplings = 0, chestContents = contents })
+	mock.setEventBudget(60)
+
+	runWaiting("1")
+
+	H.contains(mock.getFile("ccchop.log") or "", "hors de portee", "message explicite")
+end)
+
+H.case("le stock de saplings est refait au coffre dès qu'il passe sous la réserve", function()
+	-- Pas seulement à zéro : sinon la turtle rase la canopée -- inutile avec
+	-- un mod où les feuilles tombent aussitôt -- alors que le coffre a de quoi.
+	terrain({ saplings = 2, chestContents = {
+		[1] = { name = LOG, count = 64 },
+		[2] = { name = SAPLING, count = 64 },
+	} })
+
+	run("1")
+
+	H.ok(saplingsOnBoard() >= 30, "stock refait : " .. saplingsOnBoard())
+end)
