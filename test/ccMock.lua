@@ -24,6 +24,7 @@ local httpRoutes, httpLog, httpEnabled
 local t                    -- état du turtle
 local clock, events, timers, nextTimer, eventBudget
 local screen
+local extraPlants          -- graines de mods déclarées par les tests
 
 local FUEL_VALUES = {
 	["minecraft:coal"]        = 80,
@@ -55,6 +56,7 @@ function M.reset(opts)
 	rednetState = { open = nil, sent = {}, inbox = {} }
 	httpRoutes, httpLog, httpEnabled = {}, {}, true
 	clock, events, timers, nextTimer = 0, {}, {}, 1
+	extraPlants = {}
 	-- Volontairement bas : les tests normaux consomment très peu d'événements,
 	-- donc un plafond serré fait échouer une boucle sans fin en quelques
 	-- secondes plutôt que de figer la suite.
@@ -494,7 +496,7 @@ function turtle.detectDown() return detectAt(t.x, t.y, t.z - 1) end
 local function inspectAt(x, y, z)
 	local b = world[key(x, y, z)]
 	if not b then return false, "No block to inspect" end
-	return true, { name = b.name, state = b.state or {} }
+	return true, { name = b.name, state = b.state or {}, tags = b.tags or {} }
 end
 
 function turtle.inspect() local x, y, z = ahead() return inspectAt(x, y, z) end
@@ -584,12 +586,15 @@ local PLANTS = {
 	["minecraft:beetroot_seeds"] = "minecraft:beetroots",
 }
 
+--- Déclare une graine de mod : poser `item` plante la culture `block`.
+function M.addPlant(item, block) extraPlants[item] = block end
+
 local function placeAt(x, y, z)
 	local s = t.inv[t.selected]
 	if not s then return false, "No items to place" end
 	if world[key(x, y, z)] then return false, "Cannot place block here" end
 	if entities[key(x, y, z)] then return false, "Cannot place block here" end
-	local crop = PLANTS[s.name]
+	local crop = PLANTS[s.name] or extraPlants[s.name]
 	if crop then
 		local below = world[key(x, y, z - 1)]
 		if not below or below.name ~= "minecraft:farmland" then

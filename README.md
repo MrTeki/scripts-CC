@@ -15,7 +15,7 @@ le disque (`F:\Minecraft\scripts CC\*.lua`) sont désormais du legacy.
 | `ccChopper.lua` | turtle | Ferme à arbres : abattage, replantage, four à charbon, reprise après reboot |
 | `ccStairs.lua` | turtle | Creuse un escalier descendant, pose marches et torches |
 | `ccFarm.lua` | turtle | Ferme à cultures : récolte et replantage |
-| `ccFarmer.lua` | turtle | Champ 9x9 autour d'un coffre central : tournées en spirale, dépôt, recharge, reprise après reboot |
+| `ccFarmer.lua` | turtle | Champ 9x9 autour d'un coffre central : cultures des mods (apprises en jeu), melons, citrouilles, riz ; dépôt, recharge, reprise après reboot |
 | `ccInventory.lua` | computer | Gestion d'inventaire en réseau : coffres, moniteurs, crafting |
 | `ccRemote.lua` | pocket | Interface de pilotage à distance des turtles via rednet |
 | `ccClock.lua` | computer | Horloge sur moniteur |

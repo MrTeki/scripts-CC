@@ -2,6 +2,11 @@
 -- Installation : source d'eau au centre du champ, coffre posé sur l'eau,
 -- turtle posée au-dessus du coffre. Sa direction au premier lancement
 -- devient la direction de référence (dir 0).
+--
+-- Melons et citrouilles : alterner rangées de tiges et rangées libres, où
+-- poussent les fruits. Riz (Farmer's Delight) : champ entièrement en eau,
+-- coffre surélevé d'un bloc, turtle au-dessus ; elle ne voit alors que les
+-- panicules, qu'elle récolte sans toucher au pied.
 
 ------------------------------------------------------------
 -- Configuration
@@ -19,13 +24,47 @@ local STARTUP        = 'shell.run("ccFarmer")\n'
 
 local args = { ... }
 
--- bloc => âge mature et item à replanter
+-- Cultures connues : âge de maturité et objet à replanter. Une culture
+-- absente d'ici est apprise en jeu (voir learnAge).
 local CROPS = {
-  ["minecraft:wheat"]     = { age = 7, seed = "minecraft:wheat_seeds" },
-  ["minecraft:carrots"]   = { age = 7, seed = "minecraft:carrot" },
-  ["minecraft:potatoes"]  = { age = 7, seed = "minecraft:potato" },
-  ["minecraft:beetroots"] = { age = 3, seed = "minecraft:beetroot_seeds" },
+  ["minecraft:wheat"]       = { age = 7, seed = "minecraft:wheat_seeds" },
+  ["minecraft:carrots"]     = { age = 7, seed = "minecraft:carrot" },
+  ["minecraft:potatoes"]    = { age = 7, seed = "minecraft:potato" },
+  ["minecraft:beetroots"]   = { age = 3, seed = "minecraft:beetroot_seeds" },
+  ["minecraft:nether_wart"] = { age = 3, seed = "minecraft:nether_wart" },
+  -- Farmer's Delight
+  ["farmersdelight:cabbages"] = { age = 7, seed = "farmersdelight:cabbage_seeds" },
+  ["farmersdelight:onions"]   = { age = 7, seed = "farmersdelight:onion" },
+  -- Le jeune plant devient « tomatoes » en grandissant : jamais récolté.
+  ["farmersdelight:budding_tomatoes"] = { age = math.huge, seed = "farmersdelight:tomato_seeds" },
+  ["farmersdelight:tomatoes"]         = { age = 3, seed = "farmersdelight:tomato_seeds" },
+  -- Veggies Delight
+  ["veggiesdelight:bellpepper_crop"]   = { age = 7, seed = "veggiesdelight:bellpepper_seeds" },
+  ["veggiesdelight:broccoli_crop"]     = { age = 5, seed = "veggiesdelight:broccoli_seeds" },
+  ["veggiesdelight:cauliflower_crop"]  = { age = 7, seed = "veggiesdelight:cauliflower_seeds" },
+  ["veggiesdelight:garlic_crop"]       = { age = 5, seed = "veggiesdelight:garlic_clove" },
+  ["veggiesdelight:sweet_potato_crop"] = { age = 5, seed = "veggiesdelight:sweet_potato" },
+  ["veggiesdelight:turnip_crop"]       = { age = 5, seed = "veggiesdelight:turnip_seeds" },
+  ["veggiesdelight:zucchini_crop"]     = { age = 7, seed = "veggiesdelight:zucchini_seeds" },
 }
+
+-- Fruits : cassés sans replanter, à l'âge indiqué s'il y en a un.
+local FRUITS = {
+  ["minecraft:melon"]   = {},
+  ["minecraft:pumpkin"] = {},
+  ["farmersdelight:rice_panicles"] = { age = 3 },
+}
+
+-- Jamais cassés, en plus des tiges (reconnues à leur nom) : ils portent
+-- la récolte suivante.
+local KEEP = {
+  ["farmersdelight:rice"]             = true,
+  ["farmersdelight:tomatoes_on_rope"] = true,
+}
+
+-- Âge à partir duquel une culture inconnue est forcément mûre : le maximum
+-- des cultures du jeu.
+local AGE_CAP = 7
 
 -- items acceptés comme fuel dans le coffre
 local FUELS = {
@@ -44,8 +83,13 @@ local DY = { [0] = 1, 0, -1, 0 }
 local state = {
   x = 0, y = 0, dir = 0,
   inTour = false, idx = 1, outward = true,
-  lastSeed = nil, tours = 0, stats = {},
+  tours = 0, stats = {},
   nextTourAt = nil,   -- os.epoch("utc") en ms ; survit aux redémarrages
+  -- Mémoire des cases, "x,y" => { kind, block, seed, age } ; kind vaut
+  -- crop, fruit, stem, empty ou other. Mise à jour à chaque passage.
+  cells = {},
+  -- Cultures inconnues apprises : nom => { max, known, seed }
+  learned = {},
 }
 local flags   = { paused = false, runNow = false, quit = false }
 local ui      = { status = "Demarrage", alert = nil, fuelLow = false }
@@ -83,6 +127,8 @@ local function load()
          and type(data.y) == "number" and type(data.dir) == "number" then
         for k, v in pairs(data) do state[k] = v end
         state.stats = state.stats or {}
+        state.cells = state.cells or {}
+        state.learned = state.learned or {}
         return true
       end
     end
@@ -351,39 +397,170 @@ end
 ------------------------------------------------------------
 -- Travail d'une case
 ------------------------------------------------------------
+local function cellKey(c) return c.x .. "," .. c.y end
+
+-- Total par nom d'objet, pour savoir ce qu'une récolte a rapporté
+local function inventoryCounts()
+  local out = {}
+  for s = 1, 16 do
+    local d = turtle.getItemDetail(s)
+    if d then out[d.name] = (out[d.name] or 0) + d.count end
+  end
+  return out
+end
+
+local function plant(seed)
+  local s = seed and findItem(seed)
+  if not s then return false end
+  turtle.select(s)
+  local ok = turtle.placeDown()
+  turtle.select(1)
+  return ok
+end
+
+local function isCropTagged(block)
+  local tags = block.tags or {}
+  return tags["minecraft:crops"] or tags["c:crops"]
+end
+
+-- Une tige voisine (déjà vue) fait d'un bloc apparu sur une case vide un fruit
+local function nextToStem(c)
+  for d = 0, 3 do
+    local n = state.cells[(c.x + DX[d]) .. "," .. (c.y + DY[d])]
+    if n and n.kind == "stem" then return true end
+  end
+  return false
+end
+
+-- Nature d'un bloc : "stem", "fruit", "crop" ou nil (on n'y touche pas)
+local function classify(block, mem, c)
+  local name, age = block.name, block.state and block.state.age
+  if KEEP[name] or name:find("stem", 1, true) then return "stem" end
+  if FRUITS[name] then return "fruit", FRUITS[name] end
+  if CROPS[name] then return "crop", CROPS[name] end
+  if type(age) == "number" and isCropTagged(block) then return "crop" end
+  if type(age) ~= "number" and mem and (mem.kind == "empty" or mem.kind == "fruit")
+     and nextToStem(c) then
+    return "fruit", {}
+  end
+end
+
+-- Apprentissage de l'âge de maturité, repris de ccFarm : une culture non
+-- mûre ne rend que sa graine, donc un seul objet. Deux garde-fous, car une
+-- carotte mûre peut aussi n'en rendre qu'un : à AGE_CAP, ou sans croissance
+-- depuis le passage précédent, l'âge est retenu tel quel.
+local function learnAge(L, age, gained, stagnant)
+  local n = 0
+  for _, count in pairs(gained) do n = n + count end
+  if n > 1 or age >= AGE_CAP or stagnant then
+    L.known, L.max = true, age
+  else
+    L.max = age + 1
+  end
+end
+
+-- Cherche, parmi les objets récoltés, celui qui replante la même culture.
+-- Plante au passage la case quand il le trouve.
+local function learnSeed(L, name, gained)
+  local candidates = {}
+  for item in pairs(gained) do candidates[#candidates + 1] = item end
+  table.sort(candidates, function(a, b)
+    local sa, sb = a:find("seed", 1, true) ~= nil, b:find("seed", 1, true) ~= nil
+    if sa ~= sb then return sa end
+    return a < b
+  end)
+  for _, item in ipairs(candidates) do
+    if plant(item) then
+      local ok, b = turtle.inspectDown()
+      if ok and b.name == name then
+        L.seed = item
+        return true
+      end
+      turtle.digDown()   -- mauvais objet posé : on le reprend
+    end
+  end
+  return false
+end
+
 -- Retourne false si la place manque pour récolter (retour au coffre nécessaire)
-local function workCell()
+local function workCell(c)
+  local key = cellKey(c)
+  local mem = state.cells[key]
   local ok, block = turtle.inspectDown()
 
   if not ok then
-    -- case vide : replante la dernière graine récoltée
-    if state.lastSeed then
-      local s = findItem(state.lastSeed)
-      if s then
-        turtle.select(s)
-        turtle.placeDown()
-      end
+    -- Case vide : on ne replante que ce qu'on y a déjà vu pousser.
+    if mem and mem.kind == "crop" then
+      plant(mem.seed)
+    elseif not mem or mem.kind ~= "fruit" then
+      state.cells[key] = { kind = "empty" }
     end
     return true
   end
 
-  local crop = CROPS[block.name]
-  if not crop or not block.state or (block.state.age or 0) < crop.age then
-    return true   -- bloc inconnu ou culture immature : on ignore
+  local name = block.name
+  local age = block.state and block.state.age
+  local kind, info = classify(block, mem, c)
+
+  if kind == "stem" then
+    state.cells[key] = { kind = "stem", block = name }
+    return true
   end
 
-  if countFree() < MIN_FREE_SLOTS then return false end
+  if kind == "fruit" then
+    state.cells[key] = { kind = "fruit", block = name }
+    if info.age and (age or 0) < info.age then return true end
+    if countFree() < MIN_FREE_SLOTS then return false end
+    turtle.select(1)
+    turtle.digDown()
+    return true
+  end
 
+  if kind ~= "crop" then
+    state.cells[key] = { kind = "other", block = name }
+    return true
+  end
+
+  -- Culture : connue, ou apprise au fil des récoltes.
+  local L = not info and (state.learned[name] or { max = 1, known = false })
+  local sameBlock = mem and mem.kind == "crop" and mem.block == name
+  local stagnant = sameBlock and mem.age == age and age > 0
+  local mature
+  if info then
+    mature = age >= info.age
+  else
+    mature = age >= L.max or (not L.known and (age >= AGE_CAP or stagnant))
+  end
+  local seed = info and info.seed or L.seed or (sameBlock and mem.seed) or nil
+
+  -- Pas de place : on revient après le coffre, sans avoir noté l'âge, sinon
+  -- la culture paraîtrait sans croissance au retour.
+  if mature and countFree() < MIN_FREE_SLOTS then return false end
+  state.cells[key] = { kind = "crop", block = name, seed = seed, age = age }
+  if not mature then return true end
+
+  local before = L and (not L.known or not L.seed) and inventoryCounts()
   turtle.select(1)   -- le ramassage part du slot sélectionné : on complète les stacks existants
-  if turtle.digDown() then
-    state.lastSeed = crop.seed
-    save()   -- un arrêt avant placeDown replantera la bonne graine
-    local s = findItem(crop.seed)
-    if s then
-      turtle.select(s)
-      turtle.placeDown()
+  if not turtle.digDown() then return true end
+  state.cells[key].age = nil
+  save()   -- un arrêt avant la replantation retrouvera la graine en mémoire
+
+  if before then
+    local gained = {}
+    for item, count in pairs(inventoryCounts()) do
+      local d = count - (before[item] or 0)
+      if d > 0 then gained[item] = d end
     end
+    if not L.known then learnAge(L, age, gained, stagnant) end
+    state.learned[name] = L
+    if not L.seed and learnSeed(L, name, gained) then
+      state.cells[key].seed = L.seed
+      return true
+    end
+    seed = seed or L.seed
+    state.cells[key].seed = seed
   end
+  plant(seed)
   return true
 end
 
@@ -399,7 +576,7 @@ end
 local function runTour()
   flags.runNow = false   -- une demande faite pendant la tournée est satisfaite par celle-ci
   if not state.inTour then
-    state.inTour, state.idx, state.lastSeed = true, 1, nil
+    state.inTour, state.idx = true, 1
     save()
   end
   while state.idx <= #spiral do
@@ -407,7 +584,7 @@ local function runTour()
     setStatus(("Tournee %d : case %d/%d"):format(state.tours + 1, state.idx, #spiral))
     goTo(c.x, c.y)
     checkpoint()
-    if workCell() then
+    if workCell(c) then
       state.idx = state.idx + 1
       save()
     else

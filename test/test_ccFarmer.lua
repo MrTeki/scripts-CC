@@ -120,8 +120,7 @@ end
 
 H.case("ccFarmer : cultures mûres récoltées et replantées, le reste intact", function()
 	field()
-	-- Champ planté partout : sinon les graines en trop partent sur les cases
-	-- vides (cas testé à part).
+	-- Champ planté partout : les graines en trop rentrent toutes au coffre.
 	eachCell(function(sx, sy) setCrop(sx, sy, wheat(3)) end)
 	setCrop(1, 0, wheat(7))
 	setCrop(-2, 3, wheat(7))
@@ -156,22 +155,212 @@ H.case("ccFarmer : la spirale couvre les 80 cases, sans rien perdre", function()
 	H.eq(#mock.groundItems(), 0, "rien n'est tombé au sol")
 end)
 
-H.case("ccFarmer : les cases vides reçoivent la dernière graine récoltée", function()
+-- Ordre de la spirale (tournée vers l'extérieur) : (0,1), (1,1), (1,0),
+-- (1,-1), (0,-1)... Les tests qui dépendent de l'ordre s'y réfèrent.
+
+local CARROTS = "minecraft:carrots"
+local CARROT  = "minecraft:carrot"
+
+local function carrots(age)
+	return cropDef(CARROTS, age, { { name = CARROT, count = 3 } })
+end
+
+--- Culture de mod inconnue : seul le tag la désigne comme culture.
+local function modCrop(name, age, drops)
+	local def = cropDef(name, age, drops)
+	def.tags = { ["minecraft:crops"] = true }
+	return def
+end
+
+local function cellMem(sx, sy)
+	return savedState().cells[sx .. "," .. sy]
+end
+
+H.case("ccFarmer : une case vide jamais vue cultivée reste vide", function()
 	field()
-	setCrop(1, 0, wheat(7))   -- première case de la spirale
-	setCrop(1, 1, wheat(3))
+	setCrop(0, 1, wheat(7))
+	runWaiting()
+	H.eq(getCrop(0, 1).state.age, 0, "case récoltée replantée")
+	H.isNil(getCrop(1, 1), "case vide voisine : rien de semé")
+	H.eq(chestSummary()[SEEDS], 1, "la graine en trop rentre au coffre")
+	H.eq(cellMem(1, 1).kind, "empty", "case notée vide")
+end)
+
+H.case("ccFarmer : une case cultivée retrouvée vide est replantée avec SA graine", function()
+	field()
+	setCrop(0, 1, carrots(7))   -- premiere case : rapporte des carottes
+	-- (1,1) a porté des carottes au passage précédent, elle est vide.
+	writeState({ x = 0, y = 0, dir = 0, tours = 1, stats = {}, cells = {
+		["1,1"] = { kind = "crop", block = CARROTS, seed = CARROT },
+	} })
+	runWaiting()
+	H.eq(getCrop(1, 1).name, CARROTS, "replantée en carotte")
+	H.eq(getCrop(1, 1).state.age, 0, "jeune pousse")
+	H.eq(cellMem(1, 1).seed, CARROT, "mémoire conservée")
+end)
+
+H.case("ccFarmer : champ mixte, chaque case garde sa culture", function()
+	field()
+	eachCell(function(sx, sy) setCrop(sx, sy, wheat(3)) end)
+	setCrop(0, 1, carrots(7))
+	setCrop(1, 1, wheat(7))
+	setCrop(1, 0, carrots(7))
+	runWaiting()
+	H.eq(getCrop(0, 1).name, CARROTS, "carotte replantée en carotte")
+	H.eq(getCrop(1, 1).name, WHEAT, "blé replanté en blé")
+	H.eq(getCrop(1, 0).name, CARROTS, "carotte encore")
+end)
+
+H.case("ccFarmer : la mémoire suit un changement de culture", function()
+	field()
+	setCrop(0, 1, carrots(7))
+	writeState({ x = 0, y = 0, dir = 0, tours = 1, stats = {}, cells = {
+		["0,1"] = { kind = "crop", block = WHEAT, seed = SEEDS },
+	} })
+	runWaiting()
+	H.eq(getCrop(0, 1).name, CARROTS, "replantée avec ce qui y poussait")
+	H.eq(cellMem(0, 1).block, CARROTS, "mémoire mise à jour")
+	H.eq(cellMem(0, 1).seed, CARROT, "nouvelle graine retenue")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Fruits, tiges, riz, tomates
+-- ---------------------------------------------------------------------------
+
+H.case("ccFarmer : melon cueilli, tige intacte, emplacement jamais semé", function()
+	field()
+	setCrop(0, 1, wheat(7))
+	setCrop(1, 1, cropDef("minecraft:attached_melon_stem", nil, nil))
+	setCrop(1, 0, cropDef("minecraft:melon", nil,
+		{ { name = "minecraft:melon_slice", count = 5 } }))
+	setCrop(1, -1, cropDef("minecraft:pumpkin_stem", 7, nil))
 	runWaiting()
 
-	-- 1 blé + 2 graines, une replantée sur place : il reste UNE graine, pour
-	-- la première case vide rencontrée ensuite.
-	local planted = 0
-	eachCell(function(sx, sy)
-		local b = getCrop(sx, sy)
-		if b and b.state.age == 0 then planted = planted + 1 end
-	end)
-	H.eq(planted, 2, "case récoltée + une case vide")
-	H.eq(chestSummary()[SEEDS], nil, "plus de graine en trop")
-	H.eq(getCrop(1, 1).state.age, 3, "la culture immature n'est pas touchée")
+	H.eq(getCrop(1, 1).name, "minecraft:attached_melon_stem", "tige du melon intacte")
+	H.eq(getCrop(1, -1).name, "minecraft:pumpkin_stem", "tige mûre intacte")
+	H.isNil(getCrop(1, 0), "melon cueilli, rien replanté")
+	H.eq(chestSummary()["minecraft:melon_slice"], 5, "tranches au coffre")
+	H.eq(cellMem(1, 0).kind, "fruit", "emplacement de fruit retenu")
+	H.eq(cellMem(1, 1).kind, "stem", "tige retenue")
+end)
+
+H.case("ccFarmer : fruit de mod reconnu à sa tige voisine", function()
+	field()
+	setCrop(0, 1, cropDef("mymod:gourd_stem", 7, nil))
+	setCrop(1, 1, cropDef("mymod:gourd", nil, { { name = "mymod:gourd", count = 1 } }))
+	setCrop(-1, 0, cropDef("mymod:gourd", nil, { { name = "mymod:gourd", count = 1 } }))
+	writeState({ x = 0, y = 0, dir = 0, tours = 1, stats = {}, cells = {
+		["0,1"]  = { kind = "stem", block = "mymod:gourd_stem" },
+		["1,1"]  = { kind = "empty" },
+		["-1,0"] = { kind = "empty" },
+	} })
+	runWaiting()
+	H.isNil(getCrop(1, 1), "à côté d'une tige : cueilli")
+	H.eq(getCrop(-1, 0).name, "mymod:gourd", "sans tige voisine : laissé")
+end)
+
+H.case("ccFarmer : riz, turtle surélevée, seules les panicules mûres sont coupées", function()
+	-- Turtle en z = 0, panicules en z = -1, pied de riz dans l'eau en z = -2.
+	field()
+	local function rice(sx, sy, age)
+		local x, y = at(sx, sy)
+		mock.setBlock(x, y, -2, cropDef("farmersdelight:rice", 3, nil))
+		mock.setBlock(x, y, -1, cropDef("farmersdelight:rice_panicles", age,
+			{ { name = "farmersdelight:rice_panicle", count = 1 } }))
+	end
+	rice(0, 1, 3)
+	rice(1, 1, 2)
+	runWaiting()
+
+	H.isNil(getCrop(0, 1), "panicule mûre coupée")
+	H.eq(getCrop(1, 1).state.age, 2, "panicule verte laissée")
+	local x, y = at(0, 1)
+	H.eq(mock.getBlock(x, y, -2).name, "farmersdelight:rice", "le pied reste")
+	H.eq(chestSummary()["farmersdelight:rice_panicle"], 1, "récolte au coffre")
+end)
+
+H.case("ccFarmer : tomates récoltées mûres, jeune plant jamais coupé", function()
+	field()
+	mock.addPlant("farmersdelight:tomato_seeds", "farmersdelight:budding_tomatoes")
+	setCrop(0, 1, cropDef("farmersdelight:tomatoes", 3, {
+		{ name = "farmersdelight:tomato", count = 2 },
+		{ name = "farmersdelight:tomato_seeds", count = 1 },
+	}))
+	setCrop(1, 1, cropDef("farmersdelight:budding_tomatoes", 4, nil))
+	runWaiting()
+	H.eq(getCrop(0, 1).name, "farmersdelight:budding_tomatoes", "replantée en jeune plant")
+	H.eq(getCrop(1, 1).state.age, 4, "jeune plant à l'âge max laissé")
+	H.eq(chestSummary()["farmersdelight:tomato"], 2, "tomates au coffre")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Cultures inconnues : apprentissage
+-- ---------------------------------------------------------------------------
+
+H.case("ccFarmer : culture inconnue, âge et graine appris en récoltant", function()
+	field()
+	mock.addPlant("mymod:berry_seeds", "mymod:berries")
+	-- Pas mûre : ne rend que sa graine.
+	setCrop(0, 1, modCrop("mymod:berries", 2, { { name = "mymod:berry_seeds", count = 1 } }))
+	-- Mûre : rend fruit et graine.
+	setCrop(1, 1, modCrop("mymod:berries", 5, {
+		{ name = "mymod:berry", count = 2 },
+		{ name = "mymod:berry_seeds", count = 1 },
+	}))
+	-- Plus jeune que l'âge 5 une fois appris : laissée.
+	setCrop(1, 0, modCrop("mymod:berries", 4, { { name = "mymod:berry_seeds", count = 1 } }))
+	runWaiting()
+
+	local L = savedState().learned["mymod:berries"]
+	H.eq(L.known, true, "maturité connue")
+	H.eq(L.max, 5, "âge appris sur la récolte à plusieurs objets")
+	H.eq(L.seed, "mymod:berry_seeds", "graine apprise")
+	H.eq(getCrop(0, 1).state.age, 0, "essai replanté")
+	H.eq(getCrop(1, 1).state.age, 0, "récolte replantée")
+	H.eq(getCrop(1, 0).state.age, 4, "culture plus jeune laissée")
+	H.eq(chestSummary()["mymod:berry"], 2, "fruits au coffre")
+end)
+
+H.case("RÉGRESSION ccFarmer : culture mûre qui ne rend qu'un objet", function()
+	-- ccFarm en concluait « pas mûre » et repoussait l'âge au-delà du maximum :
+	-- la culture n'était plus jamais récoltée.
+	field()
+	mock.addPlant("mymod:root", "mymod:roots")
+	setCrop(0, 1, modCrop("mymod:roots", 7, { { name = "mymod:root", count = 1 } }))
+	runWaiting()
+	local L = savedState().learned["mymod:roots"]
+	H.eq(L.max, 7, "âge plafonné")
+	H.eq(L.known, true, "retenu comme maturité")
+	H.eq(L.seed, "mymod:root", "la récolte elle-même sert de graine")
+end)
+
+H.case("ccFarmer : culture inconnue sans croissance depuis le passage précédent", function()
+	field()
+	mock.addPlant("mymod:root", "mymod:roots")
+	setCrop(0, 1, modCrop("mymod:roots", 4, { { name = "mymod:root", count = 1 } }))
+	writeState({ x = 0, y = 0, dir = 0, tours = 1, stats = {},
+		learned = { ["mymod:roots"] = { max = 6, known = false, seed = "mymod:root" } },
+		cells = { ["0,1"] = { kind = "crop", block = "mymod:roots", seed = "mymod:root", age = 4 } } })
+	runWaiting()
+	local L = savedState().learned["mymod:roots"]
+	H.eq(L.max, 4, "âge où la culture s'est arrêtée")
+	H.eq(L.known, true, "maturité retenue")
+	H.eq(getCrop(0, 1).state.age, 0, "récoltée et replantée")
+end)
+
+H.case("ccFarmer : un objet posé par erreur pendant l'apprentissage est repris", function()
+	field()
+	mock.addPlant("mymod:sprout", "mymod:sprouts")
+	-- « apple » passe avant « sprout » : il est essayé en premier, et posé
+	-- comme un bloc ordinaire.
+	setCrop(0, 1, modCrop("mymod:sprouts", 7, {
+		{ name = "mymod:apple", count = 1 },
+		{ name = "mymod:sprout", count = 1 },
+	}))
+	runWaiting()
+	H.eq(getCrop(0, 1).name, "mymod:sprouts", "la bonne graine est plantée")
+	H.eq(savedState().learned["mymod:sprouts"].seed, "mymod:sprout", "graine retenue")
+	H.eq(chestSummary()["mymod:apple"], 1, "la pomme est revenue au coffre")
 end)
 
 H.case("ccFarmer : betterave mûre à l'âge 3", function()
