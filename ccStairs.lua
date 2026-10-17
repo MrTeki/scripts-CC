@@ -71,7 +71,7 @@ local function isStairs(itemName)
 end
 
 local function isTorch(itemName)
-    return string.match(itemName, "minecraft:torch") ~= nil
+    return itemName == "minecraft:torch"
 end
 
 local function selectStairSlot()
@@ -96,12 +96,26 @@ local function selectTorchSlot()
     return false
 end
 
+-- Fuel
+
+local unlimitedFuel = turtle.getFuelLevel() == "unlimited"
+
+local function getFuelLevel()
+    if unlimitedFuel then
+        return math.huge
+    end
+    return turtle.getFuelLevel()
+end
+
 local function refuel()
 	for slot = 1, 16 do
 		local itemDetail = turtle.getItemDetail(slot)
-        turtle.select(slot)
-		if itemDetail ~= nil and turtle.refuel(1) then
-            return true
+		-- keep the stairs and torches for building, wooden stairs burn
+		if itemDetail ~= nil and not isStairs(itemDetail.name) and not isTorch(itemDetail.name) then
+            turtle.select(slot)
+            if turtle.refuel(1) then
+                return true
+            end
 		end
 	end
     return false
@@ -118,7 +132,11 @@ if #tArgs < 1 then
     return 0
 end
 
-local floorsToMine = tArgs[1] + 0
+local floorsToMine = tonumber(tArgs[1])
+if not floorsToMine or floorsToMine < 1 or floorsToMine % 1 ~= 0 then
+    logMsg("Floors must be a whole number >= 1.")
+    return 0
+end
 
 local function startup()
     local startupSuccess = true
@@ -152,7 +170,7 @@ local function startup()
     else
         fuelNeeded = 3 + ((floorsToMine - 2) * 4)
     end
-    while turtle.getFuelLevel() < fuelNeeded and refuel() do
+    while getFuelLevel() < fuelNeeded and refuel() do
     end
 
     logMsg("There is " .. freeSlotCount .. "/" .. slotsNeeded .. " free slots.")
@@ -171,7 +189,7 @@ local function startup()
         logMsg("Not enough torches !")
     end
     logMsg("There is " .. turtle.getFuelLevel() .. "/" .. fuelNeeded .. " fuel left.")
-    if turtle.getFuelLevel() < fuelNeeded then
+    if getFuelLevel() < fuelNeeded then
         startupSuccess = false
         logMsg("Not enough fuel !")
     end
@@ -184,55 +202,83 @@ end
 
 -- Digging
 
-local function move(direction)
-    local movement = nil
-    if direction == "forward" then
-        movement = turtle.forward
-    elseif direction == "up" then
-        movement = turtle.up
-    elseif direction == "down" then
-        movement = turtle.down
-    else
+local maxAttempts = 20
+
+local actions = {
+    forward = {
+        move = turtle.forward, detect = turtle.detect, dig = turtle.dig,
+        inspect = turtle.inspect, attack = turtle.attack,
+    },
+    up = {
+        move = turtle.up, detect = turtle.detectUp, dig = turtle.digUp,
+        inspect = turtle.inspectUp, attack = turtle.attackUp,
+    },
+    down = {
+        move = turtle.down, detect = turtle.detectDown, dig = turtle.digDown,
+        inspect = turtle.inspectDown, attack = turtle.attackDown,
+    },
+}
+
+local function getActions(direction)
+    local action = actions[direction]
+    if not action then
         error("Error: Bad direction")
     end
-    while not movement() do
-        -- fuel check
-        if turtle.getFuelLevel() < 1 then
-            refuel()
-        else
-            msg("Can't move " .. direction)
+    return action
+end
+
+-- Errors raised with level 0 stop the digging with a readable message
+local function dig(direction)
+    local action = getActions(direction)
+    while action.detect() do
+        if not action.dig() then
+            local _, block = action.inspect()
+            local name = type(block) == "table" and block.name or "unknown"
+            error("Can't dig " .. direction .. " " .. name, 0)
+        end
+        -- let falling blocks (gravel, sand) land before checking again
+        if direction ~= "down" then
+            sleep(0.5)
         end
     end
 end
 
-local function dig(direction)
-    local detect = nil
-    local dig = nil
-    local inspect = nil
-    if direction == "forward" then
-        detect = turtle.detect
-        dig = turtle.dig
-        inspect = turtle.inspect
-    elseif direction == "up" then
-        detect = turtle.detectUp
-        dig = turtle.digUp
-        inspect = turtle.inspectUp
-    elseif direction == "down" then
-        detect = turtle.detectDown
-        dig = turtle.digDown
-        inspect = turtle.inspectDown
-    else
-        error("Error: Bad direction")
-    end
-    while detect() do
-        if not dig() then
-            local block = inspect()
-            if block == nil or block.name == nil then
-                block = {name = "unknown"}
+local function move(direction)
+    local action = getActions(direction)
+    for attempt = 1, maxAttempts do
+        if action.move() then
+            return
+        end
+        if getFuelLevel() < 1 then
+            if not refuel() then
+                error("Out of fuel", 0)
             end
-            msg("Can't dig " .. direction .. " " .. block.name)
+        elseif action.detect() then
+            dig(direction)
+        else
+            -- probably a mob in the way
+            msg("Can't move " .. direction)
+            action.attack()
+            sleep(0.5)
         end
     end
+    error("Can't move " .. direction, 0)
+end
+
+local function placeDown()
+    for attempt = 1, maxAttempts do
+        if turtle.placeDown() then
+            return
+        end
+        if turtle.detectDown() then
+            dig("down")
+        else
+            -- probably a mob in the way
+            turtle.attackDown()
+            sleep(0.5)
+        end
+    end
+    error("Can't place down", 0)
 end
 
 local function placeStair()
@@ -241,8 +287,7 @@ local function placeStair()
         end
         while not turtle.turnRight() do
         end
-        while not turtle.placeDown() do
-        end
+        placeDown()
         while not turtle.turnRight() do
         end
         while not turtle.turnRight() do
@@ -289,14 +334,19 @@ local function digRemainingLevels(floorNumber)
     return placeStair()
 end
 
-for i = 1, floorsToMine do
-    if i == 1 then
-        digFirstLevel()
-    elseif i == 2 then
-        digSecondLevel()
-    else
-        digRemainingLevels(i)
+local ok, err = pcall(function()
+    for i = 1, floorsToMine do
+        if i == 1 then
+            digFirstLevel()
+        elseif i == 2 then
+            digSecondLevel()
+        else
+            digRemainingLevels(i)
+        end
     end
+end)
+if not ok then
+    logMsg("Stop: " .. tostring(err))
 end
 
 monitor.scroll(1)

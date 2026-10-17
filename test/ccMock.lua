@@ -36,6 +36,8 @@ local FUEL_VALUES = {
 	-- Un sapling brûle aussi, comme en jeu : c'est ce qui permettait à
 	-- ccChopper de brûler ses propres saplings au ravitaillement.
 	["minecraft:oak_sapling"] = 5,
+	-- Les escaliers en bois aussi : ccStairs les brûlait au démarrage.
+	["minecraft:oak_stairs"]  = 15,
 }
 
 local DELTA = {
