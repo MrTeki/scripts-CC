@@ -246,11 +246,11 @@ end)
 
 H.case("ccFarmer : fruit de mod reconnu à sa tige voisine", function()
 	field()
-	setCrop(0, 1, cropDef("mymod:gourd_stem", 7, nil))
+	setCrop(0, 1, cropDef("mymod:attached_gourd_stem", nil, nil))
 	setCrop(1, 1, cropDef("mymod:gourd", nil, { { name = "mymod:gourd", count = 1 } }))
 	setCrop(-1, 0, cropDef("mymod:gourd", nil, { { name = "mymod:gourd", count = 1 } }))
 	writeState({ x = 0, y = 0, dir = 0, tours = 1, stats = {}, cells = {
-		["0,1"]  = { kind = "stem", block = "mymod:gourd_stem" },
+		["0,1"]  = { kind = "stem", block = "mymod:attached_gourd_stem" },
 		["1,1"]  = { kind = "empty" },
 		["-1,0"] = { kind = "empty" },
 	} })
@@ -531,4 +531,147 @@ H.case("ccFarmer : écran couleur, boutons colorés sans négatif", function()
 	H.eq(mock.screenBg(2, 13), colors.orange, "Pause en orange")
 	H.eq(mock.screenBg(10, 13), colors.lime, "Tournee en vert")
 	H.eq(mock.screenBg(20, 13), colors.red, "Quitter en rouge")
+end)
+
+-- ---------------------------------------------------------------------------
+-- Reprise après un arrêt en plein mouvement
+-- ---------------------------------------------------------------------------
+-- Le chunk peut être déchargé entre un mouvement et la sauvegarde qui le
+-- suit : la sauvegarde a alors un mouvement de retard. Avant le correctif,
+-- la turtle finissait arrêtée à côté du coffre, « Coffre introuvable ».
+
+--- Place la turtle du mock en (sx, sy) du script, cap `dir` du script (les
+--- caps des deux repères ont la même numérotation).
+local function putTurtle(sx, sy, dir)
+	local t = mock.getTurtle()
+	t.x, t.y = at(sx, sy)
+	t.dir = dir
+end
+
+local function onChest()
+	local t = mock.getTurtle()
+	return t.x == 0 and t.y == 0 and t.z == 0
+end
+
+local function pendingState(x, y, dir, pending)
+	writeState({ x = x, y = y, dir = dir, tours = 0, stats = {}, pending = pending })
+end
+
+H.case("RÉGRESSION ccFarmer : pas fait mais pas sauvegardé, le fuel tranche", function()
+	field()
+	setCrop(0, 1, wheat(7))
+	-- Partie de (0,1) vers le coffre : le pas a eu lieu, la sauvegarde non.
+	putTurtle(0, 0, 2)
+	mock.getTurtle().fuel = 4999
+	pendingState(0, 1, 2, { kind = "move", fuel = 5000 })
+	runWaiting()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(savedState().tours, 1, "la tournée a eu lieu")
+	H.eq(getCrop(0, 1).state.age, 0, "blé récolté")
+	H.isNil(savedState().pending, "plus de mouvement en suspens")
+end)
+
+H.case("ccFarmer : pas annoncé mais pas fait, rien à corriger", function()
+	field()
+	putTurtle(0, 1, 2)
+	pendingState(0, 1, 2, { kind = "move", fuel = 5000 })
+	runWaiting()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(savedState().tours, 1, "la tournée a eu lieu")
+end)
+
+H.case("RÉGRESSION ccFarmer : quart de tour fait mais pas sauvegardé", function()
+	field()
+	putTurtle(0, 1, 1)
+	pendingState(0, 1, 0, { kind = "turn", to = 1 })
+	runWaiting()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(savedState().tours, 1, "la tournée a eu lieu")
+end)
+
+H.case("ccFarmer : quart de tour annoncé mais pas fait, essai puis correction", function()
+	-- La première hypothèse (tour fait) est fausse : la turtle ne trouve pas
+	-- le coffre, revient à son point de départ et essaie l'autre.
+	field()
+	eachCell(function(sx, sy) setCrop(sx, sy, wheat(3)) end)
+	putTurtle(0, 1, 0)
+	pendingState(0, 1, 0, { kind = "turn", to = 1 })
+	runWaiting()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(savedState().tours, 1, "la tournée a eu lieu")
+	H.eq(replanted(), 0, "rien d'immature n'a été coupé pendant l'essai")
+end)
+
+H.case("ccFarmer : fuel illimité, le pas incertain est vérifié au coffre", function()
+	field()
+	local t = mock.getTurtle()
+	t.unlimitedFuel = true
+	putTurtle(0, 1, 2)   -- le pas n'a PAS eu lieu
+	pendingState(0, 1, 2, { kind = "move", fuel = "unlimited" })
+	runWaiting()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(savedState().tours, 1, "la tournée a eu lieu")
+end)
+
+H.case("ccFarmer : position introuvable, la turtle s'arrête et le dit", function()
+	field()
+	mock.setBlock(0, 0, -1, nil)   -- plus de coffre : aucune hypothèse ne tient
+	putTurtle(0, 1, 0)
+	pendingState(0, 1, 0, { kind = "turn", to = 1 })
+	runWaiting()
+	local screen = {}
+	for y = 1, 13 do screen[#screen + 1] = mock.screenLine(y) end
+	H.contains(table.concat(screen, "\n"), "Position perdue", "alerte affichée")
+	H.contains(table.concat(screen, "\n"), "recal", "remède indiqué")
+	H.eq(savedState().tours, 0, "aucune tournée à l'aveugle")
+end)
+
+H.case("ccFarmer : recal remet la position à zéro et garde la mémoire", function()
+	field()
+	writeState({ x = 3, y = -2, dir = 1, tours = 4, stats = { [WHEAT] = 10 },
+		inTour = true, idx = 12, pending = { kind = "turn", to = 2 },
+		cells = { ["0,1"] = { kind = "crop", block = WHEAT, seed = SEEDS } } })
+	run("recal")
+	local st = savedState()
+	H.eq(st.x, 0, "x") H.eq(st.y, 0, "y") H.eq(st.dir, 0, "cap")
+	H.isNil(st.pending, "plus de mouvement en suspens")
+	H.eq(st.inTour, false, "tournée abandonnée")
+	H.eq(st.tours, 4, "compteur conservé")
+	H.eq(st.cells["0,1"].seed, SEEDS, "mémoire du champ conservée")
+	H.eq(mock.getTurtle().x, 0, "la turtle n'a pas bougé")
+end)
+
+H.case("RÉGRESSION ccFarmer : position décalée en tournée, le coffre n'est jamais miné", function()
+	-- La turtle se croit en (1,-1), elle est en (1,0) : décalée d'une case.
+	-- La case suivante (0,-1) l'amène en réalité AU-DESSUS du coffre. Sa
+	-- mémoire y voyait un emplacement de fruit à côté d'une tige : l'ancienne
+	-- version prenait le coffre pour un fruit et le minait.
+	field({ chest = { [1] = { name = "minecraft:coal", count = 5 } } })
+	setCrop(-1, -1, wheat(7))
+	putTurtle(1, 0, 3)
+	writeState({ x = 1, y = -1, dir = 3, tours = 0, stats = {},
+		inTour = true, idx = 5, outward = true,
+		cells = {
+			["0,-1"] = { kind = "empty" },
+			["1,-1"] = { kind = "stem", block = "minecraft:melon_stem" },
+		} })
+	runWaiting()
+
+	local chest = mock.getBlock(0, 0, -1)
+	H.ok(chest and chest.inventory, "le coffre est toujours là")
+	H.eq(savedState().recals, 1, "recalage compté")
+	H.ok(onChest(), "revenue sur le coffre en fin de tournée")
+	H.eq(getCrop(-1, -1).state.age, 0, "la case suivante est la bonne")
+end)
+
+H.case("RÉGRESSION ccFarmer : une tige non attachée ne fait pas d'un bloc un fruit", function()
+	field()
+	setCrop(0, 1, cropDef("minecraft:melon_stem", 7, nil))
+	setCrop(1, 1, "minecraft:torch")
+	writeState({ x = 0, y = 0, dir = 0, tours = 1, stats = {}, cells = {
+		["0,1"] = { kind = "stem", block = "minecraft:melon_stem" },
+		["1,1"] = { kind = "empty" },
+	} })
+	runWaiting()
+	H.eq(getCrop(1, 1).name, "minecraft:torch", "torche laissée en place")
 end)

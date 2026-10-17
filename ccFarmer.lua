@@ -240,19 +240,23 @@ end
 ------------------------------------------------------------
 -- Déplacements
 ------------------------------------------------------------
-local function turnRight()
+-- Chaque mouvement est annoncé dans la sauvegarde (state.pending) AVANT
+-- d'être fait. Un rechargement du chunk peut couper la turtle entre le
+-- mouvement et la sauvegarde qui suit : sans cette annonce, elle repartait
+-- décalée d'une case ou d'un quart de tour, et finissait arrêtée à côté du
+-- coffre. Voir recover().
+local function turn(delta, fn)
   checkpoint()
-  turtle.turnRight()
-  state.dir = (state.dir + 1) % 4
+  local to = (state.dir + delta) % 4
+  state.pending = { kind = "turn", to = to }
+  save()
+  fn()
+  state.dir, state.pending = to, nil
   save()
 end
 
-local function turnLeft()
-  checkpoint()
-  turtle.turnLeft()
-  state.dir = (state.dir + 3) % 4
-  save()
-end
+local function turnRight() turn(1, turtle.turnRight) end
+local function turnLeft() turn(3, turtle.turnLeft) end
 
 local function face(d)
   local diff = (d - state.dir) % 4
@@ -266,13 +270,17 @@ local function forward()
   local tries = 0
   while true do
     checkpoint()
+    state.pending = { kind = "move", fuel = turtle.getFuelLevel() }
+    save()
     if turtle.forward() then
       state.x = state.x + DX[state.dir]
       state.y = state.y + DY[state.dir]
+      state.pending = nil
       save()
       ui.alert = nil
       return
     end
+    state.pending = nil
     tries = tries + 1
     if fuelLevel() == 0 then
       ui.alert = "Plus de fuel !"
@@ -294,6 +302,45 @@ local function goTo(tx, ty)
   end
 end
 
+local function chestBelow() return getChest() ~= nil end
+
+-- Reprise après un arrêt en plein mouvement : le mouvement annoncé a-t-il
+-- eu lieu ? Pour un pas, le fuel le dit. Pour un quart de tour (ou un fuel
+-- illimité), on essaie chaque hypothèse : rentrer au coffre, et s'il n'est
+-- pas dessous, revenir au point de départ -- un repère faux mais cohérent
+-- ramène bien au même endroit -- puis essayer la suivante.
+local function recover()
+  local p = state.pending
+  if not p then return true end
+  local here = { x = state.x, y = state.y, dir = state.dir }
+  local done = { x = here.x, y = here.y, dir = here.dir }
+  if p.kind == "turn" then
+    done.dir = p.to
+  else
+    done.x, done.y = here.x + DX[here.dir], here.y + DY[here.dir]
+    local f = turtle.getFuelLevel()
+    if f ~= "unlimited" and p.fuel ~= "unlimited" then
+      local moved = f < p.fuel
+      local s = moved and done or here
+      state.x, state.y, state.pending = s.x, s.y, nil
+      save()
+      return true
+    end
+  end
+
+  state.pending = nil
+  setStatus("Reprise : verification de la position")
+  for _, h in ipairs({ done, here }) do
+    state.x, state.y, state.dir = h.x, h.y, h.dir
+    save()
+    goTo(0, 0)
+    if chestBelow() then return true end
+    goTo(h.x, h.y)
+    face(h.dir)
+  end
+  return false
+end
+
 ------------------------------------------------------------
 -- Coffre : dépôt et fuel
 ------------------------------------------------------------
@@ -302,7 +349,7 @@ local function deposit()
   while true do
     checkpoint()
     if not getChest() then
-      setStatus("Coffre introuvable sous la turtle")
+      setStatus("Coffre introuvable : ccFarmer recal ?")
     else
       for s = 1, 16 do
         local d = turtle.getItemDetail(s)
@@ -423,11 +470,17 @@ local function isCropTagged(block)
   return tags["minecraft:crops"] or tags["c:crops"]
 end
 
--- Une tige voisine (déjà vue) fait d'un bloc apparu sur une case vide un fruit
+-- Une tige ATTACHÉE voisine (déjà vue) fait d'un bloc apparu sur une case
+-- vide un fruit. Attachée seulement : une tige ne l'est que lorsqu'un fruit
+-- a réellement poussé à côté d'elle. N'importe quelle tige suffisait avant,
+-- et un bloc posé là -- ou le coffre, vu d'une position décalée -- était
+-- cueilli.
 local function nextToStem(c)
   for d = 0, 3 do
     local n = state.cells[(c.x + DX[d]) .. "," .. (c.y + DY[d])]
-    if n and n.kind == "stem" then return true end
+    if n and n.kind == "stem" and n.block and n.block:find("attached", 1, true) then
+      return true
+    end
   end
   return false
 end
@@ -487,6 +540,16 @@ local function workCell(c)
   local key = cellKey(c)
   local mem = state.cells[key]
   local ok, block = turtle.inspectDown()
+
+  -- Un inventaire sous une case du champ : la turtle est en réalité au-dessus
+  -- du coffre, sa position est décalée. Elle s'y recale au lieu de travailler
+  -- la case -- c'est ainsi qu'un coffre a été miné.
+  if ok and getChest() then
+    state.x, state.y = 0, 0
+    state.recals = (state.recals or 0) + 1   -- affiché : signe d'un décalage
+    save()
+    return true
+  end
 
   if not ok then
     -- Case vide : on ne replante que ce qu'on y a déjà vu pousser.
@@ -604,6 +667,14 @@ end
 -- Boucle principale (seule à commander la turtle)
 ------------------------------------------------------------
 local function mainLoop()
+  if not recover() then
+    ui.alert = "Position perdue : ccFarmer recal"
+    setStatus("Reposer la turtle sur le coffre")
+    while true do
+      checkpoint()
+      sleep(RETRY_DELAY)
+    end
+  end
   if state.inTour then
     runTour()        -- reprise après redémarrage
   else
@@ -659,6 +730,10 @@ local function draw()
   local y = 4
   if ui.fuelLow then line(y, "! Reserve de fuel faible", colors.orange) y = y + 1 end
   if ui.alert then line(y, "! " .. ui.alert, colors.red) y = y + 1 end
+  if state.recals then
+    line(y, "! Recale sur le coffre : " .. state.recals .. " fois", colors.orange)
+    y = y + 1
+  end
   if state.nextTourAt and not state.inTour then
     local r = math.max(0, math.ceil((state.nextTourAt - os.epoch("utc")) / 1000))
     line(y, ("Prochaine tournee : %d:%02d"):format(math.floor(r / 60), r % 60), colors.lightGray)
@@ -739,9 +814,21 @@ if args[1] == "del" then
   removeStartup()
   print("Etat oublie, redemarrage auto retire.")
   return
+elseif args[1] == "recal" then
+  -- La turtle a été reposée à la main sur le coffre, face à la direction
+  -- de référence : on garde la mémoire du champ, pas la position.
+  load()
+  state.x, state.y, state.dir, state.pending = 0, 0, 0, nil
+  state.inTour = false
+  save()
+  print("Position remise a zero, memoire du champ conservee.")
+  print("Relancer avec : ccFarmer")
+  return
 elseif args[1] ~= nil then
-  print("ccFarmer       lance ou reprend la ferme")
-  print("ccFarmer del   oublie l'etat et le redemarrage auto")
+  print("ccFarmer         lance ou reprend la ferme")
+  print("ccFarmer recal   turtle reposee sur le coffre, face")
+  print("                 a la direction de reference")
+  print("ccFarmer del     oublie l'etat et le redemarrage auto")
   return
 end
 
