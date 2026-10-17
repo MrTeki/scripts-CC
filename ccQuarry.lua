@@ -229,6 +229,7 @@ local S = {
 	RETURN_HOME = "RETOUR",
 	SERVICE     = "SERVICE",
 	AWAIT_HUMAN = "ATTENTE",
+	AWAIT_FUEL  = "CARBURANT",
 	PAUSED      = "PAUSE",
 	FINISHING   = "FINITION",
 	DONE        = "TERMINE",
@@ -842,6 +843,15 @@ local function serviceUnload(refuel)
 	return nil
 end
 
+--- Assez de carburant pour retourner à la prochaine cellule, et en revenir ?
+local function fuelForWork()
+	local cell = ccPlan.cellAt(ctx.job, math.min(ctx.index, ccPlan.total(ctx.job)))
+	return ccFuel.level() > ccFuel.reserve(cell, nil, CONFIG.fuelMargin)
+end
+
+local FUEL_CHEST_RETRY = 60   -- secondes entre deux fouilles du coffre
+local WAIT_MARK = "ccquarry_wait"
+
 STATES[S.SERVICE] = function()
 	if not serviceUnload(true) then
 		-- Aucun moyen de dépôt : on brûle ce qu'on a, on jette le rebut, et le
@@ -868,10 +878,14 @@ STATES[S.SERVICE] = function()
 		return S.AWAIT_HUMAN
 	end
 
-	local cell = ccPlan.cellAt(ctx.job, math.min(ctx.index, ccPlan.total(ctx.job)))
-	if ccFuel.level() <= ccFuel.reserve(cell, nil, CONFIG.fuelMargin) then
+	if not fuelForWork() then
 		journal("Carburant insuffisant : en fournir a la turtle")
-		ctx.afterWait = S.SERVICE
+		-- Le coffre vient d'être fouillé : on ne le refouillera qu'à
+		-- l'échéance. Le refaire à chaque réveil, c'était aspirer puis rendre
+		-- le butin qu'on venait d'y déposer, en boucle -- refuelFromChest ne
+		-- peut pas savoir où est le combustible sans tout sortir.
+		ctx.chestRetryAt = os.clock() + FUEL_CHEST_RETRY
+		ctx.afterWait = S.AWAIT_FUEL
 		return S.AWAIT_HUMAN
 	end
 
@@ -879,16 +893,39 @@ STATES[S.SERVICE] = function()
 	return S.GO_TO_WORK
 end
 
+--- Attente de carburant. Ce qu'on donne à la turtle est brûlé à chaque
+-- réveil ; le coffre, lui, n'est refouillé qu'à l'échéance, ou sur la
+-- commande REFUEL.
+STATES[S.AWAIT_FUEL] = function()
+	ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
+	if fuelForWork() then
+		journal("Carburant fourni, reprise")
+		tidyInventory()
+		ctx.reason = nil
+		return S.GO_TO_WORK
+	end
+	if os.clock() >= (ctx.chestRetryAt or 0) then return S.SERVICE end
+	ctx.afterWait = S.AWAIT_FUEL
+	return S.AWAIT_HUMAN
+end
+
 --- Attend une intervention humaine. C'est le comportement par DÉFAUT sans
 -- coffre reconnu : le butin d'une carrière ne doit pas partir au sol sans que
 -- ce soit demandé. Le réveil se fait sur un changement d'inventaire, et sur un
 -- minuteur pour que les commandes reçues entre-temps soient traitées.
 STATES[S.AWAIT_HUMAN] = function()
+	-- Les turtle_inventory déjà en file viennent des propres manipulations de
+	-- la turtle juste avant l'attente : s'y réveiller relançait aussitôt
+	-- l'état demandeur, sans que personne n'ait rien donné. Seuls comptent
+	-- ceux qui suivent ce marqueur.
+	os.queueEvent(WAIT_MARK)
+	local armed = false
 	local timer = os.startTimer(5)
 	repeat
 		local event, id = waitEvent()
 		if ctx.stopped then return S.AWAIT_HUMAN end
-	until event == "turtle_inventory" or (event == "timer" and id == timer)
+		if event == WAIT_MARK then armed = true end
+	until (armed and event == "turtle_inventory") or (event == "timer" and id == timer)
 
 	-- La décision de repartir appartient à l'état qui a demandé l'attente :
 	-- lui seul connaît les conditions à revérifier.

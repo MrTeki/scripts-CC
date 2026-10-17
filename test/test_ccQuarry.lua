@@ -247,6 +247,28 @@ H.case("la turtle brule son propre charbon au lieu de rentrer", function()
 	H.ok(mock.getTurtle().fuel > 30, "du charbon a ete brule")
 end)
 
+H.case("en panne seche, le coffre n'est pas refouille a chaque reveil", function()
+	-- Sans combustible dans le coffre, chaque fouille aspire puis rend le butin
+	-- qu'on vient d'y deposer. Refaire le service a chaque reveil de l'attente
+	-- tournait en boucle.
+	terrain({ width = 3, depth = 3, height = 6, fuel = 40, noChest = true })
+	mock.setSlot(1, nil)
+	mock.setChest(-1, 0, 0, {}, 27)
+
+	local fouilles = 0
+	local vrai = turtle.suck
+	turtle.suck = function(...) fouilles = fouilles + 1 return vrai(...) end
+	mock.setEventBudget(300)
+	pcall(run, "3", "3", "6")
+	turtle.suck = vrai
+
+	local trace = mock.getFile("ccquarry.log")
+	local _, attentes = trace:gsub("Carburant insuffisant", "")
+	H.ok(attentes >= 1, "la turtle attend du carburant")
+	H.ok(attentes <= 3, "coffre refouille " .. attentes .. " fois, au plus 3 attendu")
+	H.ok(fouilles <= 3 * 27, "aspirations : " .. fouilles)
+end)
+
 H.case("un conteneur d'un mod inconnu est accepte sur sa TAILLE", function()
 	-- Aucun motif de nom ne correspond, mais l'API peripheral tranche : c'est
 	-- un inventaire de 54 slots, donc du stockage.
