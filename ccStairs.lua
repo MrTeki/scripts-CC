@@ -165,9 +165,9 @@ local function startup()
     end
 
     logMsg("There is " .. freeSlotCount .. "/" .. slotsNeeded .. " free slots.")
+    -- only a warning: with a full inventory, digging drops the blocks
     if freeSlotCount < slotsNeeded then
-        startupSuccess = false
-        logMsg("Not enough free slots !")
+        logMsg("Inventory may fill up, blocks will drop")
     end
     logMsg("There is " .. stairsCount .. "/" .. floorsToMine .. " stairs.")
     if stairsCount < floorsToMine then

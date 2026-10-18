@@ -158,6 +158,18 @@ H.case("ccStairs : Entrée seule à \"proceed anyway\" refuse", function()
 	H.eq(mock.getTurtle().x, 0, "pas bougé")
 end)
 
+H.case("ccStairs : inventaire plein, simple avertissement", function()
+	setup()
+	mock.setSlot(1, STAIRS, 1)
+	for slot = 2, 16 do mock.setSlot(slot, "minecraft:diamond", 1) end
+	answer = ""
+	local ok, err = pcall(run, "1")
+	answer = "yes"
+	if not ok then error(err, 0) end
+	H.contains(screenText(), "Inventory may fill up", "avertissement")
+	H.eq(stairAt(1), STAIRS, "creuse sans demander")
+end)
+
 H.case("ccStairs : nombre d'étages invalide", function()
 	for _, value in ipairs({ "abc", "0", "-2", "1.5" }) do
 		setup()
