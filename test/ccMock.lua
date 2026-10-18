@@ -591,7 +591,10 @@ local PLANTS = {
 --- Déclare une graine de mod : poser `item` plante la culture `block`.
 function M.addPlant(item, block) extraPlants[item] = block end
 
-local function placeAt(x, y, z)
+--- `fromAbove` : posé par placeDown. Comme CC:Tweaked, un escalier posé ainsi
+--- s'appuie sur le bloc du dessous ; sans lui, CC clique la face inférieure du
+--- turtle et l'escalier est posé à l'envers (half = "top").
+local function placeAt(x, y, z, fromAbove)
 	local s = t.inv[t.selected]
 	if not s then return false, "No items to place" end
 	if world[key(x, y, z)] then return false, "Cannot place block here" end
@@ -606,6 +609,11 @@ local function placeAt(x, y, z)
 	elseif s.name:find("chest") then
 		M.setChest(x, y, z, {}, 27)
 		world[key(x, y, z)].name = s.name
+	elseif s.name:find("_stairs$") then
+		local upsideDown = fromAbove and not world[key(x, y, z - 1)]
+		M.setBlock(x, y, z, { name = s.name, state = {
+			facing = t.dir, half = upsideDown and "top" or "bottom",
+		} })
 	else
 		M.setBlock(x, y, z, { name = s.name })
 	end
@@ -616,7 +624,7 @@ end
 
 function turtle.place() local x, y, z = ahead() return placeAt(x, y, z) end
 function turtle.placeUp() return placeAt(t.x, t.y, t.z + 1) end
-function turtle.placeDown() return placeAt(t.x, t.y, t.z - 1) end
+function turtle.placeDown() return placeAt(t.x, t.y, t.z - 1, true) end
 
 --- Dépose dans le conteneur visé. Retourne false si PLEIN : c'est le cas qui
 --- fait boucler ccQuarry à l'infini aujourd'hui.

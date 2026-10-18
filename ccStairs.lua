@@ -1,6 +1,5 @@
 local completion = require "cc.completion"
 local monitor = term.current()
-local sizeX,sizeY = monitor.getSize()
 
 -- Logging
 
@@ -36,7 +35,7 @@ local function askUserForAgreement(question)
         local input = read(nil, nil, function(t)
             return completion.choice(t, { "yes", "no" })
         end)
-        if not input then return end
+        if not input then return false end
 
         input = input:lower()
         if input == "" or input == "yes" or input == "y" then
@@ -55,15 +54,6 @@ local function getItemList()
 		itemList[slot] = turtle.getItemDetail(slot)
 	end
 	return itemList
-end
-
-local function findEmptySlot(itemList, size)
-	for slot=1, size do
-		if not itemList[slot] then
-			return true, slot
-		end
-	end
-	return false, nil
 end
 
 local function isStairs(itemName)
@@ -183,8 +173,10 @@ local function startup()
         startupSuccess = false
         logMsg("Not enough stairs !")
     end
-    logMsg("There is " .. torchesCount .. "/" .. (floorsToMine / 2) .. " torches.")
-    if floorsToMine > 2 and torchesCount < floorsToMine / 2 then
+    -- a torch on every even floor from the 4th one
+    local torchesNeeded = math.max(0, math.floor(floorsToMine / 2) - 1)
+    logMsg("There is " .. torchesCount .. "/" .. torchesNeeded .. " torches.")
+    if torchesCount < torchesNeeded then
         startupSuccess = false
         logMsg("Not enough torches !")
     end
@@ -281,20 +273,57 @@ local function placeDown()
     error("Can't place down", 0)
 end
 
-local function placeStair()
-    if selectStairSlot() then
-        while not turtle.turnRight() do
-        end
-        while not turtle.turnRight() do
-        end
-        placeDown()
-        while not turtle.turnRight() do
-        end
-        while not turtle.turnRight() do
-        end
-        return true
-    end
+-- Common blocks from digging, solid and not falling
+local fillerNames = {
+    cobblestone = true, cobbled_deepslate = true, stone = true, deepslate = true,
+    dirt = true, andesite = true, diorite = true, granite = true, tuff = true,
+    calcite = true, netherrack = true, blackstone = true,
+}
+
+local function selectFillerSlot()
+	for slot = 1, 16 do
+		local itemDetail = turtle.getItemDetail(slot)
+		if itemDetail ~= nil and fillerNames[itemDetail.name:match(":(.+)$")] then
+            turtle.select(slot)
+            return true
+		end
+	end
     return false
+end
+
+local function turnAround()
+    turtle.turnRight()
+    turtle.turnRight()
+end
+
+-- With nothing under it (cave, liquid), CC leans the stair against the
+-- bottom of the turtle and places it upside down: fill the hole and redo it.
+local function fixUpsideDownStair()
+    local _, block = turtle.inspectDown()
+    if type(block) ~= "table" or not block.state or block.state.half ~= "top" then
+        return
+    end
+    if not selectFillerSlot() then
+        logMsg("Upside-down stair, no block to fill the hole")
+        return
+    end
+    dig("down")
+    move("down")
+    turtle.placeDown()
+    move("up")
+    selectStairSlot()
+    placeDown()
+end
+
+local function placeStair()
+    if not selectStairSlot() then
+        error("Out of stairs", 0)
+    end
+    -- face backwards so the stair goes down the way we dig
+    turnAround()
+    placeDown()
+    fixUpsideDownStair()
+    turnAround()
 end
 
 local function digFirstLevel()
@@ -345,7 +374,9 @@ local ok, err = pcall(function()
         end
     end
 end)
-if not ok then
+if ok then
+    logMsg("Done: " .. floorsToMine .. " floors dug.")
+else
     logMsg("Stop: " .. tostring(err))
 end
 
