@@ -38,9 +38,10 @@ local function askUserForAgreement(question)
         if not input then return false end
 
         input = input:lower()
-        if input == "" or input == "yes" or input == "y" then
+        -- Enter alone refuses: proceeding means something is missing
+        if input == "yes" or input == "y" then
             return true
-        elseif input == "no" or input == "n" then
+        elseif input == "" or input == "no" or input == "n" then
             return false
         end
     end
@@ -188,7 +189,7 @@ local function startup()
 
     return startupSuccess
 end
-if not startup() and not askUserForAgreement("Do you want to proceed anyway ?") then
+if not startup() and not askUserForAgreement("Do you want to proceed anyway ? (y/N)") then
     return 0 
 end
 
@@ -228,8 +229,10 @@ local function dig(direction)
             local name = type(block) == "table" and block.name or "unknown"
             error("Can't dig " .. direction .. " " .. name, 0)
         end
-        -- let falling blocks (gravel, sand) land before checking again
-        if direction ~= "down" then
+        -- let falling blocks (gravel, sand) land before checking again. Only
+        -- needed above: what falls in front lands on the turtle once it moved
+        -- in, and the dig up that always follows clears it.
+        if direction == "up" then
             sleep(0.5)
         end
     end

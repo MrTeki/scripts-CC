@@ -14,10 +14,13 @@ package.preload["cc.completion"] = function()
 	return { choice = function() return {} end }
 end
 
+-- Réponse tapée à "proceed anyway ?"
+local answer = "yes"
+
 local function run(...)
 	local chunk = assert(loadfile("ccStairs.lua"))
 	local vraiRead, vraiWrite = _G.read, io.write
-	_G.read = function() return "yes" end
+	_G.read = function() return answer end
 	io.write = function() end
 	local ok, err = pcall(chunk, ...)
 	_G.read, io.write = vraiRead, vraiWrite
@@ -143,6 +146,16 @@ H.case("RÉGRESSION ccStairs : trou sous la marche, comblé puis marche à l'end
 	H.eq(stair and stair.name, STAIRS, "marche 2")
 	H.eq(stair.state.half, "bottom", "marche 2 à l'endroit")
 	H.eq(mock.getBlock(2, 0, -3) ~= nil, true, "trou comblé")
+end)
+
+H.case("ccStairs : Entrée seule à \"proceed anyway\" refuse", function()
+	setup()
+	answer = ""
+	local ok, err = pcall(run, "2")
+	answer = "yes"
+	if not ok then error(err, 0) end
+	H.contains(screenText(), "Not enough stairs", "alerte")
+	H.eq(mock.getTurtle().x, 0, "pas bougé")
 end)
 
 H.case("ccStairs : nombre d'étages invalide", function()
