@@ -244,3 +244,114 @@ H.case("force retélécharge même ce qui est à jour", function()
 	H.eq(#installed, 1, "réinstallée")
 	H.contains(installedSource(A), "revision", "contenu rafraîchi")
 end)
+
+-- ---------------------------------------------------------------------------
+-- update : ccBoot, le script, puis les APIs du nouveau script
+-- ---------------------------------------------------------------------------
+
+local SCRIPT = "monScript"
+
+local function scriptSource(version, needs)
+	return "-- script de test\nlocal REPO = 'x'\nlocal VERSION = " .. version .. "\n"
+		.. "local NEEDS = {\n\t" .. needs .. "\n}\nprint('script v" .. version .. "')\n"
+end
+
+local function manifestWithScript(scriptVersion, bootVersion)
+	return "return { apis = {\n"
+		.. "  " .. A .. " = { version = 1, path = 'apis/" .. A .. ".lua' },\n"
+		.. "  " .. B .. " = { version = 1, path = 'apis/" .. B .. ".lua' },\n"
+		.. (bootVersion and ("  ccBoot = { version = " .. bootVersion .. ", path = 'apis/ccBoot.lua' },\n") or "")
+		.. "}, scripts = {\n"
+		.. "  " .. SCRIPT .. " = { version = " .. scriptVersion .. ", path = '" .. SCRIPT .. ".lua' },\n"
+		.. "} }\n"
+end
+
+H.case("scriptVersion et needsOf lisent la source sans l'executer", function()
+	local src = scriptSource(3, A .. " = 2, " .. B .. " = 1,")
+	H.eq(ccBoot.scriptVersion(src), 3, "version")
+	H.eq(ccBoot.scriptVersion("local SAVE_VERSION = 9"), nil, "pas une autre constante")
+	local needs = ccBoot.needsOf(src)
+	H.eq(needs[A], 2, "premiere dependance")
+	H.eq(needs[B], 1, "seconde dependance")
+	H.isNil(ccBoot.needsOf("print('rien')"), "pas de NEEDS")
+end)
+
+H.case("update reinstalle le script plus recent et les APIs qu'il demande", function()
+	-- Le cas qui imposait un wget a la main : la nouvelle version du script
+	-- depend d'une API que l'ancienne ne connaissait pas.
+	fresh()
+	mock.putFile("apis/" .. A .. ".lua", source(A, 1))
+	mock.putFile(SCRIPT, scriptSource(1, A .. " = 1,"))
+	mock.setUrl(REPO .. "manifest.lua", manifestWithScript(2))
+	mock.setUrl(REPO .. SCRIPT .. ".lua", scriptSource(2, A .. " = 1, " .. B .. " = 1,"))
+
+	local ok, report = ccBoot.update(REPO, { [A] = 1 }, { name = SCRIPT, version = 1, path = SCRIPT })
+	H.ok(ok, "succes")
+	H.eq(report.script, 2, "script mis a jour")
+	H.eq(mock.getFile(SCRIPT), scriptSource(2, A .. " = 1, " .. B .. " = 1,"), "ecrit a son chemin")
+	H.eq(table.concat(report.apis, ","), B, "la nouvelle dependance est installee")
+	H.eq(installedSource(B), source(B, 1), "contenu de la nouvelle API")
+	H.eq(mock.httpRequests()[1], REPO .. "manifest.lua", "manifeste d'abord")
+	local manifests = 0
+	for _, url in ipairs(mock.httpRequests()) do
+		if url == REPO .. "manifest.lua" then manifests = manifests + 1 end
+	end
+	H.eq(manifests, 1, "le manifeste n'est telecharge qu'une fois")
+end)
+
+H.case("update ne touche pas a un script deja a jour", function()
+	fresh()
+	mock.putFile("apis/" .. A .. ".lua", source(A, 1))
+	mock.putFile(SCRIPT, scriptSource(2, A .. " = 1,"))
+	mock.setUrl(REPO .. "manifest.lua", manifestWithScript(2))
+
+	local ok, report = ccBoot.update(REPO, { [A] = 1 }, { name = SCRIPT, version = 2, path = SCRIPT })
+	H.ok(ok, "succes")
+	H.isNil(report.script, "pas de mise a jour")
+	H.eq(#report.apis, 0, "aucune API")
+	H.eq(#mock.httpRequests(), 1, "seul le manifeste")
+end)
+
+H.case("update sans chemin de script : seules les APIs sont traitees", function()
+	fresh()
+	mock.putFile("apis/" .. A .. ".lua", source(A, 1))
+	mock.setUrl(REPO .. "manifest.lua", manifestWithScript(5))
+
+	local ok, report = ccBoot.update(REPO, { [A] = 1 }, { name = SCRIPT, version = 1 })
+	H.ok(ok, "succes")
+	H.isNil(report.script, "script ignore")
+	H.eq(fs.exists(SCRIPT), false, "rien d'ecrit")
+end)
+
+H.case("un script telecharge illisible laisse l'ancien en place", function()
+	fresh()
+	mock.putFile("apis/" .. A .. ".lua", source(A, 1))
+	mock.putFile(SCRIPT, scriptSource(1, A .. " = 1,"))
+	mock.setUrl(REPO .. "manifest.lua", manifestWithScript(2))
+	mock.setUrl(REPO .. SCRIPT .. ".lua", "local VERSION = 2\nfunction (")
+
+	local ok, err = ccBoot.update(REPO, { [A] = 1 }, { name = SCRIPT, version = 1, path = SCRIPT })
+	H.eq(ok, false, "refus")
+	H.contains(err, SCRIPT, "script nomme")
+	H.eq(mock.getFile(SCRIPT), scriptSource(1, A .. " = 1,"), "ancien script intact")
+end)
+
+H.case("update installe d'abord un ccBoot plus recent, qui reprend la main", function()
+	fresh()
+	mock.putFile("apis/" .. A .. ".lua", source(A, 1))
+	mock.setUrl(REPO .. "manifest.lua", manifestWithScript(1, ccBoot._VERSION + 1))
+	-- Le ccBoot servi est le vrai, a la version annoncee : il doit etre
+	-- installe, recharge, et poursuivre la mise a jour sans boucler.
+	local f = assert(io.open("apis/ccBoot.lua", "r"))
+	local real = f:read("a")
+	f:close()
+	local served = real:gsub("_VERSION = %d+", "_VERSION = " .. (ccBoot._VERSION + 1), 1)
+	mock.setUrl(REPO .. "apis/ccBoot.lua", served)
+
+	local loaded = package.loaded.ccBoot
+	local ok, report = ccBoot.update(REPO, { [A] = 1 }, { name = SCRIPT, version = 1 })
+	package.loaded.ccBoot = loaded
+	H.ok(ok, "succes : " .. tostring(report))
+	H.eq(report.boot, ccBoot._VERSION + 1, "ccBoot mis a jour")
+	H.eq(mock.getFile("apis/ccBoot.lua"), served, "ecrit sur le disque")
+end)

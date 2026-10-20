@@ -144,6 +144,16 @@ demande pas de rééditer les scripts déjà installés.
    en silence. Sinon, message nommant les APIs manquantes et l'URL.
 5. `<script> update` consulte le manifeste et n'installe que ce qui est en
    retard — il ne retélécharge pas tout à l'aveugle.
+6. **`update` met tout à jour en une commande** : ccBoot d'abord, puis le
+   script lui-même à son propre chemin, puis les APIs que demandent les `NEEDS`
+   du **nouveau** script, relus dans sa source. Chaque script déclare
+   `local VERSION = n`, et `manifest.lua` la même valeur dans `scripts` : on
+   incrémente les deux à chaque publication qui doit atteindre les turtles
+   (`test/test_needs.lua` vérifie qu'elles concordent). Le nouveau script ne
+   prend effet qu'au lancement suivant.
+
+Les scripts installés avant ce mécanisme ne savent pas se remplacer : il faut
+les retélécharger une dernière fois à la main (`rm ccQuarry`, puis `wget`).
 
 Le dépôt doit rester **public** : un turtle ne peut pas garder un token GitHub
 secret.

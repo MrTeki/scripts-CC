@@ -50,6 +50,13 @@
 
 local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
+-- Version du script, comparée à celle du manifeste par `update`. À incrémenter,
+-- ici ET dans manifest.lua, à chaque publication qui doit atteindre les turtles.
+local VERSION = 1
+
+-- Version minimale de ccBoot : la première qui sait mettre à jour le script.
+local BOOT = 2
+
 local NEEDS = {
 	ccUtil = 1, ccVec = 1, ccPlan = 2, ccNav = 1, ccInv = 1, ccConfig = 2,
 	ccFuel = 1, ccSave = 1, ccUi = 1, ccNet = 1, ccMenu = 1,
@@ -57,36 +64,57 @@ local NEEDS = {
 
 local args = { ... }
 
+local function fetchBoot()
+	if not http then
+		error("apis/ccBoot.lua manquant ou trop ancien, et HTTP indisponible.\n"
+			.. "Copier le dossier apis/ depuis " .. REPO, 0)
+	end
+	local res = http.get(REPO .. "apis/ccBoot.lua")
+	if not res then error("Telechargement de ccBoot impossible : " .. REPO, 0) end
+	local body = res.readAll()
+	res.close()
+	-- Contrôle de syntaxe avant d'écraser : un ccBoot tronqué bloquerait tous
+	-- les scripts de l'ordinateur.
+	if not body or #body == 0 or not load(body, "@ccBoot") then
+		error("ccBoot telecharge illisible : " .. REPO, 0)
+	end
+	fs.makeDir("apis")
+	local f = fs.open("apis/ccBoot.lua", "w")
+	f.write(body)
+	f.close()
+	package.loaded.ccBoot = nil
+end
+
 local function boot()
 	package.path = "/apis/?.lua;apis/?.lua;" .. package.path
 
-	if not fs.exists("apis/ccBoot.lua") and not pcall(require, "ccBoot") then
-		if not http then
-			error("apis/ccBoot.lua manquant et HTTP indisponible.\n"
-				.. "Copier le dossier apis/ depuis " .. REPO, 0)
-		end
-		local res = http.get(REPO .. "apis/ccBoot.lua")
-		if not res then error("Telechargement de ccBoot impossible : " .. REPO, 0) end
-		local body = res.readAll()
-		res.close()
-		fs.makeDir("apis")
-		local f = fs.open("apis/ccBoot.lua", "w")
-		f.write(body)
-		f.close()
+	-- Un ccBoot absent, ou trop ancien pour connaître `update`, est remplacé.
+	-- Le réseau n'est touché qu'à ce moment-là, une seule fois.
+	local found, existing = pcall(require, "ccBoot")
+	if not found or type(existing) ~= "table" or (existing._VERSION or 1) < BOOT then
+		fetchBoot()
 	end
 
-	local ok, result = require("ccBoot").ensure(REPO, NEEDS, { check = args[1] == "update" })
+	local ok, result = require("ccBoot").ensure(REPO, NEEDS)
 	if not ok then error(result, 0) end
-	return result
 end
 
-local installed = boot()
+boot()
 
 if args[1] == "update" then
-	if #installed == 0 then
-		print("APIs deja a jour.")
-	else
-		print("APIs installees : " .. table.concat(installed, ", "))
+	-- ccBoot, le script lui-même, puis les APIs que demande le NOUVEAU script.
+	local path = shell and shell.getRunningProgram and shell.getRunningProgram()
+	local ok, report = require("ccBoot").update(REPO, NEEDS,
+		{ name = "ccQuarry", version = VERSION, path = path })
+	if not ok then error(report, 0) end
+
+	if report.boot then print("ccBoot mis a jour : v" .. report.boot) end
+	if report.script then
+		print("ccQuarry mis a jour : v" .. report.script .. ", relancer pour l'utiliser")
+	end
+	if #report.apis > 0 then print("APIs installees : " .. table.concat(report.apis, ", ")) end
+	if not report.boot and not report.script and #report.apis == 0 then
+		print("Tout est deja a jour.")
 	end
 	return
 end
@@ -1023,7 +1051,7 @@ local function usage()
 	print("ccQuarry <taille>      chantier cubique")
 	print("ccQuarry del           abandonne le chantier en cours")
 	print("ccQuarry config        cree ou affiche les options")
-	print("ccQuarry update        met les APIs a jour")
+	print("ccQuarry update        met le script et les APIs a jour")
 	print("")
 	print("Hauteur positive : on creuse vers le bas.")
 	print("Options : edit " .. CONFIG_PATH)

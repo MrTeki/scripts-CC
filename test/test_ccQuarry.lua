@@ -223,6 +223,38 @@ H.case("update consulte le manifeste et n'installe que ce qui est en retard", fu
 	H.eq(fs.exists("ccquarry.save"), false, "aucune sauvegarde")
 end)
 
+H.case("update remplace aussi le script, et installe les APIs qu'il demande", function()
+	terrain()
+	-- Le dépôt publie une version 2 du script qui dépend d'une API inconnue
+	-- de la version installée.
+	local f = assert(io.open("ccQuarry.lua", "r"))
+	local src = f:read("a")
+	f:close()
+	local nouveau = src:gsub("local VERSION = %d+", "local VERSION = 2", 1)
+		:gsub("local NEEDS = {", "local NEEDS = {\n\tccNouvelle = 1,", 1)
+
+	local repo = repoUrl()
+	f = assert(io.open("manifest.lua", "r"))
+	local manifeste = f:read("a"):gsub('ccQuarry    = { version = %d+', 'ccQuarry    = { version = 2', 1)
+		:gsub("apis = {", "apis = {\n\t\tccNouvelle = { version = 1, path = 'apis/ccNouvelle.lua' },", 1)
+	f:close()
+	mock.setUrl(repo .. "manifest.lua", manifeste)
+	mock.setUrl(repo .. "ccQuarry.lua", nouveau)
+	mock.setUrl(repo .. "apis/ccNouvelle.lua", "local M = { _VERSION = 1 }\nreturn M\n")
+
+	_G.shell = { getRunningProgram = function() return "ccQuarry" end }
+	local ok, sorties = pcall(run, "update")
+	_G.shell = nil
+	H.ok(ok, tostring(sorties))
+
+	local texte = table.concat(sorties, "\n")
+	H.contains(texte, "ccQuarry mis a jour : v2", "script annoncé")
+	H.contains(texte, "ccNouvelle", "nouvelle API annoncée")
+	H.eq(mock.getFile("ccQuarry"), nouveau, "script remplacé à son chemin")
+	H.ok(mock.getFile("apis/ccNouvelle.lua"), "nouvelle API installée")
+	H.eq(mock.getTurtle().z, 0, "aucun chantier lancé")
+end)
+
 -- ---------------------------------------------------------------------------
 -- Chantier complet
 -- ---------------------------------------------------------------------------

@@ -62,6 +62,23 @@ for _, script in ipairs(SCRIPTS) do
 end
 
 -- ---------------------------------------------------------------------------
+-- Versions : le manifeste annonce celle que porte le script
+-- ---------------------------------------------------------------------------
+-- Un écart dans un sens fait réinstaller le script à chaque `update` ; dans
+-- l'autre, la nouvelle version n'atteint jamais les turtles.
+
+local manifest = assert(load(read("manifest.lua"), "@manifest", "t", {}))()
+
+for _, script in ipairs(SCRIPTS) do
+	H.case(script .. " : VERSION égale à celle du manifeste", function()
+		local name = script:gsub("%.lua$", "")
+		local declared = tonumber(read(script):match("local VERSION = (%d+)"))
+		H.ok(declared, "local VERSION absent")
+		H.eq(declared, manifest.scripts[name].version, "version du manifeste")
+	end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Boutons : la touche annoncée à l'écran est celle qui agit
 -- ---------------------------------------------------------------------------
 -- ccUi surligne dans le libellé la lettre de raccourci, ou la PREMIÈRE lettre
