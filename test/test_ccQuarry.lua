@@ -334,6 +334,63 @@ local function auVidage(cfg, w, d, h)
 	return libres
 end
 
+--- Relève la position de la turtle à chaque vidage.
+local function ouVidage(cfg, w, d, h, avant)
+	local ccInv = require("ccInv")
+	terrainVarie(w, d, h)
+	mock.putFile("ccquarry.cfg", cfg)
+	if avant then avant() end
+
+	local positions = {}
+	local vrai = ccInv.unload
+	ccInv.unload = function(...)
+		local t = mock.getTurtle()
+		positions[#positions + 1] = { x = t.x, y = t.y, z = t.z }
+		return vrai(...)
+	end
+	local ok, err = pcall(run, tostring(w), tostring(d), tostring(h))
+	ccInv.unload = vrai
+	if not ok then error(err, 0) end
+	return positions
+end
+
+local function retours()
+	local n = 0
+	for _ in (mock.getFile("ccquarry.log") or ""):gmatch("| RETOUR\n") do n = n + 1 end
+	return n
+end
+
+H.case("avec un coffre portable, la turtle vide SUR PLACE sans remonter", function()
+	-- Signalé en jeu : la turtle remontait à l'origine pour poser l'ender chest
+	-- qu'elle transportait. Un aller-retour pour rien, d'autant plus long que
+	-- la carrière est profonde.
+	local positions = ouVidage("return { trash = {} }", 4, 4, 12)
+
+	local auFond = 0
+	for _, p in ipairs(positions) do
+		if p.z < 0 then auFond = auFond + 1 end
+	end
+	H.ok(auFond > 0, "au moins un vidage au fond de la carriere")
+	H.contains(mock.getFile("ccquarry.log"), "Vidage sur place", "trace dans le journal")
+	H.eq(retours(), 1, "un seul retour : celui de fin de chantier")
+	H.eq(restants(4, 4, 12), 0, "tout le volume est creuse")
+	for i = 0, 15 do
+		H.eq(mock.groundCount("minecraft:rock_" .. i), 0, "rien de perdu au sol (rock_" .. i .. ")")
+	end
+	H.ok(mock.getTurtle().inv[16], "l'ender chest est revenu en inventaire")
+end)
+
+H.case("avec un coffre fixe seulement, la turtle rentre toujours a l'origine", function()
+	local positions = ouVidage('return { trash = {}, chest = "fixed" }', 4, 4, 12, function()
+		mock.setChest(-1, 0, 0, {}, 27 * 4)
+	end)
+
+	H.ok(#positions > 1, "plusieurs vidages")
+	for _, p in ipairs(positions) do
+		H.eq(p.x .. "," .. p.y .. "," .. p.z, "0,0,0", "vidage a l'origine")
+	end
+end)
+
 H.case("la turtle rentre en gardant la marge configuree", function()
 	-- On ne cherche pas a prevoir si le prochain bloc tiendra : inspect() donne
 	-- le nom du BLOC, pas celui du BUTIN, et un meme bloc peut lacher plusieurs

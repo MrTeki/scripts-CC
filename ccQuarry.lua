@@ -20,7 +20,8 @@
 --
 -- Trois façons de récupérer le butin, essayées dans cet ordre :
 --   1. un coffre TRANSPORTABLE en inventaire (ender chest, shulker) : la
---      turtle le pose sous elle, le vide et le reprend ;
+--      turtle le pose, le vide et le reprend LÀ OÙ ELLE EST, sans remonter
+--      à l'origine ;
 --   2. un conteneur FIXE contre l'origine. C'est le mode historique, avec un
 --      coffre posé derrière la turtle. Le placer DERRIÈRE, AU-DESSUS, ou du
 --      côté opposé au chantier : la carrière s'étend vers l'avant et vers la
@@ -655,6 +656,9 @@ end
 
 local STATES = {}
 
+-- Défini plus bas, avec les autres fonctions de vidage.
+local serviceOnSite
+
 STATES[S.CALIBRATE] = function()
 	-- Le GPS, s'il est disponible, rend la reprise fiable : la position suivie
 	-- peut être en retard d'un bloc après un reboot en plein mouvement.
@@ -753,6 +757,10 @@ STATES[S.MINING] = function()
 	ctx.index = ctx.index + 1
 
 	local need = needsService()
+	-- Avec un coffre portable, le vidage se fait là où l'on est : remonter à
+	-- l'origine pour poser un coffre qu'on transporte est un aller-retour
+	-- pour rien, d'autant plus long que la carrière est profonde.
+	if need and serviceOnSite() then need = nil end
 	if need then
 		ctx.reason = need
 		return S.RETURN_HOME
@@ -866,6 +874,59 @@ local function trashAwayFrom(where)
 	return where == "up" and "down" or "up"
 end
 
+--- Vide l'inventaire dans le coffre portable déjà posé, ravitaille si
+--- demandé, puis reprend le coffre.
+-- @return true si le coffre a été repris
+local function unloadIntoChest(where, refuel)
+	local ok, reason, slot = ccInv.unload(where, { trashWhere = trashAwayFrom(where), protect = protectedSlots() })
+	if not ok then
+		journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
+	end
+
+	if refuel and ccFuel.level() < CONFIG.fuelTopUp then
+		-- Le moins cher d abord : ce qu on transporte deja.
+		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
+		local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
+		if not fine then journal("Carburant : " .. tostring(why)) end
+	end
+
+	local taken, why = ccInv.takeChest(where)
+	if not taken then journal("Reprise du coffre : " .. tostring(why)) end
+	tidyInventory()     -- le ravitaillement a pu disperser le combustible
+	return taken
+end
+
+--- Service sur place, au fond de la carrière, avec le coffre portable.
+--
+-- Le coffre n'est posé que dans une case VIDE, sous la turtle puis au-dessus :
+-- jamais rien n'est creusé pour lui faire de la place. Sous elle, c'est soit
+-- la couche qu'elle vient de creuser, soit le fond du chantier, et la pose
+-- échoue alors sans dommage ; au-dessus, c'est la couche précédente.
+--
+-- Le coffre n'est fouillé pour du carburant que si la réserve n'est plus
+-- couverte : il contient le butin, et le fouiller à chaque vidage reviendrait
+-- à en aspirer puis rendre une partie pour rien.
+-- @return true si la turtle peut reprendre le travail sans rentrer
+serviceOnSite = function()
+	if CONFIG.chest == "fixed" or CONFIG.chest == "none" then return false end
+	if not ccInv.findChest() then return false end
+
+	tidyInventory()
+	local low = not refuelOnSite()
+	for _, where in ipairs({ "down", "up" }) do
+		if ccInv.placeChest(where) then
+			journal("Vidage sur place")
+			local taken = unloadIntoChest(where, low)
+			ctx.lastTidy = nil
+			-- Coffre resté en place : on rentre, le service à l'origine
+			-- prendra le relais avec ce qu'il trouvera.
+			if not taken then return false end
+			return ccInv.freeCount() > CONFIG.spareSlots and refuelOnSite()
+		end
+	end
+	return false
+end
+
 local function serviceUnload(refuel)
 	-- Rangement AVANT le vidage : le coffre et le carburant retrouvent leurs
 	-- emplacements, et les piles partielles sont regroupées. Sans cela, du
@@ -879,21 +940,7 @@ local function serviceUnload(refuel)
 	local fixed = mode ~= "portable" and mode ~= "none"
 
 	if portable and placeChest() then
-		local ok, reason, slot = ccInv.unload("down", { trashWhere = trashAwayFrom("down"), protect = protectedSlots() })
-		if not ok then
-			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
-		end
-
-		if refuel and ccFuel.level() < CONFIG.fuelTopUp then
-			-- Le moins cher d abord : ce qu on transporte deja.
-			ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
-			local fine, why = ccFuel.refuelFromChest("down", CONFIG.fuelTopUp)
-			if not fine then journal("Carburant : " .. tostring(why)) end
-		end
-
-		local taken, why = ccInv.takeChest("down")
-		if not taken then journal("Reprise du coffre : " .. tostring(why)) end
-		tidyInventory()     -- le ravitaillement a pu disperser le combustible
+		unloadIntoChest("down", refuel)
 		return "chest"
 	end
 
