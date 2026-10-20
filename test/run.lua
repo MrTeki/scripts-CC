@@ -23,6 +23,7 @@ local MODULES = {
 	"test_ccFuel",
 	"test_ccSave",
 	"test_ccUi",
+	"test_ccMenu",
 	"test_ccNet",
 	"test_integration",
 	"test_ccQuarry",

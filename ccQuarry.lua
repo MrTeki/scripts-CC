@@ -2,26 +2,32 @@
 --
 -- Creuse une carrière rectangulaire, avec reprise après reboot.
 --
---   ccQuarry <largeur> <profondeur> <hauteur>   nouveau chantier
+--   ccQuarry                                    menu de démarrage, ou reprise
+--   ccQuarry <largeur> <profondeur> <hauteur>   nouveau chantier, sans menu
 --   ccQuarry <taille>                           chantier cubique
---   ccQuarry                                    reprend le chantier en cours
 --   ccQuarry del                                abandonne le chantier en cours
+--
+-- Sans argument ni chantier en cours, un menu règle dimensions, sens, côté,
+-- dépôt, carburant et liste de rebut, au clavier sur toute turtle et aussi à
+-- la souris sur une turtle avancée.
 --
 -- Hauteur positive : on creuse vers le BAS. Négative : vers le haut.
 --
 -- Conventions (voir README) : X / Y horizontaux, Z vertical, direction 0 = +X.
 -- L'origine est la position de départ de la turtle, qui doit regarder dans la
--- direction de la largeur.
+-- direction de la largeur. La profondeur s'étend à sa droite, ou à sa gauche
+-- si le menu le demande.
 --
 -- Trois façons de récupérer le butin, essayées dans cet ordre :
 --   1. un coffre TRANSPORTABLE en inventaire (ender chest, shulker) : la
 --      turtle le pose sous elle, le vide et le reprend ;
 --   2. un conteneur FIXE contre l'origine. C'est le mode historique, avec un
---      coffre posé derrière la turtle. Le placer DERRIÈRE, À GAUCHE ou
---      AU-DESSUS : la carrière s'étend vers l'avant et vers la droite, donc un
---      coffre posé de ces côtés-là serait miné avec le reste ;
+--      coffre posé derrière la turtle. Le placer DERRIÈRE, AU-DESSUS, ou du
+--      côté opposé au chantier : la carrière s'étend vers l'avant et vers la
+--      droite (ou la gauche), donc un coffre posé là serait miné avec le reste ;
 --   3. aucun des deux : la turtle attend qu'on vienne la vider.
--- Le conteneur fixe sert aussi de source de carburant.
+-- Le conteneur fixe sert aussi de source de carburant. L'option `chest`
+-- restreint ces modes à un seul, ou à aucun.
 --
 -- Aucun slot n'est interdit au butin. Les slots 1 et 16 sont seulement les
 -- emplacements où la turtle RANGE le carburant et le coffre : ce qui est
@@ -45,8 +51,8 @@
 local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
 local NEEDS = {
-	ccUtil = 1, ccVec = 1, ccPlan = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
-	ccFuel = 1, ccSave = 1, ccUi = 1, ccNet = 1,
+	ccUtil = 1, ccVec = 1, ccPlan = 2, ccNav = 1, ccInv = 1, ccConfig = 2,
+	ccFuel = 1, ccSave = 1, ccUi = 1, ccNet = 1, ccMenu = 1,
 }
 
 local args = { ... }
@@ -95,6 +101,7 @@ local ccSave = require("ccSave")
 local ccUi   = require("ccUi")
 local ccNet  = require("ccNet")
 local ccConfig = require("ccConfig")
+local ccMenu = require("ccMenu")
 
 -- ---------------------------------------------------------------------------
 -- Configuration
@@ -113,6 +120,10 @@ local DEFAULTS = {
 	fuelTopUp = 2000,         -- visé lors d'un ravitaillement
 	trashWhere = "up",        -- le rebut part dans la couche déjà creusée
 	dropWhenNoChest = false,  -- sans coffre : attendre, plutôt que jeter
+	chest = "auto",           -- dépôt : "auto", "portable", "fixed" ou "none"
+	chestItem = "",           -- objet accepté comme coffre portable, en plus des motifs
+	chestSlot = 16,           -- où la turtle range le coffre portable
+	fuelSlot = 1,             -- où elle range le carburant
 	keepFuel = 64,            -- combustible gardé au vidage ; le reste est du butin
 	spareSlots = 2,           -- marge de slots libres avant de rentrer vider
 
@@ -140,6 +151,17 @@ local DEFAULTS = {
 		"minecraft:cobbled_deepslate",
 		"minecraft:netherrack",
 	},
+
+	-- Dimensions proposées par le menu : celles du dernier chantier mémorisé.
+	lastJob = { width = 16, depth = 16, height = 32, down = true, left = false },
+}
+
+-- Options qu'un chantier lancé depuis le menu fixe pour toute sa durée. Elles
+-- sont copiées dans la sauvegarde : une reprise après reboot relit le fichier
+-- d'options, qui ne les contient pas forcément.
+local JOB_OPTIONS = {
+	"chest", "chestItem", "chestSlot", "fuelSlot", "dropWhenNoChest",
+	"keepFuel", "fuelMargin", "fuelTopUp", "trashWhere", "trash",
 }
 
 -- Écrit tel quel à la première exécution, puis jamais réécrit : les
@@ -156,6 +178,22 @@ return {
     --           mais elle peut attendre longtemps sans que vous le sachiez.
     --   true  : elle depose le butin au sol et continue. Perte assumee.
     dropWhenNoChest = false,
+
+    -- Mode de depot :
+    --   "auto"     : coffre portable s'il y en a un, sinon conteneur fixe ;
+    --   "portable" : seulement le coffre portable (ender chest, shulker) ;
+    --   "fixed"    : seulement le conteneur pose contre l'origine ;
+    --   "none"     : aucun depot, voir dropWhenNoChest.
+    chest = "auto",
+
+    -- Objet accepte comme coffre portable en plus de chestPatterns. Le menu le
+    -- remplit quand on designe le slot d'un conteneur non reconnu.
+    chestItem = "",
+
+    -- Slots ou la turtle RANGE le coffre portable et le carburant. Ce ne sont
+    -- pas des slots interdits au butin.
+    chestSlot = 16,
+    fuelSlot = 1,
 
     -- Blocs jetes a la volee au lieu d'etre rapportes. C'est le meilleur
     -- levier pour espacer les allers-retours de vidage : sans cette liste,
@@ -214,6 +252,10 @@ return {
 
     -- Niveau vise lors d'un ravitaillement au coffre.
     fuelTopUp = 2000,
+
+    -- Dimensions proposees par le menu de demarrage. Il les met a jour quand
+    -- on coche « Memoriser ».
+    lastJob = { width = 16, depth = 16, height = 32, down = true, left = false },
 }
 ]==]
 
@@ -246,6 +288,7 @@ local ctx = {
 	streak = 0,          -- sauts consécutifs, pour détecter le fond
 	stopped = false,
 	pending = {},        -- commandes en attente, jamais exécutées à la réception
+	options = nil,       -- options choisies au menu, gardées dans la sauvegarde
 }
 
 local store
@@ -356,6 +399,7 @@ local function save()
 		reason = ctx.reason,
 		origin = ctx.origin,
 		skips = ctx.skips,
+		options = ctx.options,
 		pos = ccNav.position(),
 	})
 end
@@ -802,7 +846,11 @@ local function serviceUnload(refuel)
 	-- contenu -- au point de jeter le vrai carburant, qui était ailleurs.
 	tidyInventory()
 
-	if placeChest() then
+	local mode = CONFIG.chest
+	local portable = mode ~= "fixed" and mode ~= "none"
+	local fixed = mode ~= "portable" and mode ~= "none"
+
+	if portable and placeChest() then
 		local ok, reason, slot = ccInv.unload("down", { trashWhere = trashAwayFrom("down"), protect = protectedSlots() })
 		if not ok then
 			journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
@@ -821,7 +869,7 @@ local function serviceUnload(refuel)
 		return "chest"
 	end
 
-	local where = findDepot()
+	local where = fixed and findDepot()
 	if where then
 		local ok, reason, slot = ccInv.unload(where, { trashWhere = trashAwayFrom(where), protect = protectedSlots() })
 		if not ok then
@@ -970,16 +1018,286 @@ end
 -- ---------------------------------------------------------------------------
 
 local function usage()
+	print("ccQuarry               menu, ou reprise du chantier")
 	print("ccQuarry <largeur> <profondeur> <hauteur>")
 	print("ccQuarry <taille>      chantier cubique")
-	print("ccQuarry               reprend le chantier en cours")
 	print("ccQuarry del           abandonne le chantier en cours")
 	print("ccQuarry config        cree ou affiche les options")
 	print("ccQuarry update        met les APIs a jour")
 	print("")
 	print("Hauteur positive : on creuse vers le bas.")
-	print("Slot 1 : carburant. Slot 16 : coffre.")
 	print("Options : edit " .. CONFIG_PATH)
+end
+
+-- ---------------------------------------------------------------------------
+-- Menu de démarrage
+-- ---------------------------------------------------------------------------
+
+local MINECRAFT = "minecraft:"
+
+local function shortName(name)
+	if name:sub(1, #MINECRAFT) == MINECRAFT then return name:sub(#MINECRAFT + 1) end
+	return name
+end
+
+local function copyList(list)
+	local out = {}
+	for i, v in ipairs(list or {}) do out[i] = v end
+	return out
+end
+
+--- Carburant que demandera le chantier, en mouvements : une cellule par
+--- mouvement, plus un aller-retour par couche et la marge. Approché, et
+--- annoncé comme tel.
+local function fuelEstimate(v)
+	local job = ccPlan.new({ width = v.width, depth = v.depth, height = v.height })
+	return ccPlan.total(job) + ccPlan.layers(job) * (v.width + v.depth) + v.height + v.fuelMargin
+end
+
+local SLOT_OPTIONS = {}
+for slot = 1, 16 do SLOT_OPTIONS[slot] = { slot, tostring(slot) } end
+
+--- Décrit le menu de démarrage de ccQuarry.
+-- L'inventaire est lu à l'ouverture puis à chaque turtle_inventory, et non à
+-- chaque image : un appel turtle par slot et par touche pressée serait du
+-- gaspillage.
+local function menuSpec()
+	local last = CONFIG.lastJob or DEFAULTS.lastJob
+	local values = {
+		width = last.width or 16, depth = last.depth or 16, height = last.height or 32,
+		down = last.down ~= false, left = last.left == true,
+		chest = CONFIG.chest, chestSlot = CONFIG.chestSlot, fuelSlot = CONFIG.fuelSlot,
+		dropWhenNoChest = CONFIG.dropWhenNoChest,
+		keepFuel = CONFIG.keepFuel, fuelMargin = CONFIG.fuelMargin, fuelTopUp = CONFIG.fuelTopUp,
+		trashWhere = CONFIG.trashWhere, trash = copyList(CONFIG.trash),
+		remember = true,
+	}
+
+	local inv = {}
+	local function refresh()
+		for slot = 1, 16 do inv[slot] = ccInv.detail(slot) end
+	end
+	refresh()
+
+	local function inInventory(name)
+		for slot = 1, 16 do
+			if inv[slot] and inv[slot].name == name then return true end
+		end
+		return false
+	end
+
+	--- Coffre portable retenu : celui du slot désigné s'il est reconnu (ou
+	--- imposé en mode portable), sinon le premier reconnu.
+	local function chestOf(v)
+		local d = inv[v.chestSlot]
+		if d and (ccInv.isChest(d.name) or v.chest == "portable") then return v.chestSlot, d end
+		for slot = 1, 16 do
+			if inv[slot] and ccInv.isChest(inv[slot].name) then return slot, inv[slot] end
+		end
+		return nil
+	end
+
+	local function trashItems(v)
+		local names = {}
+		local fuel = inv[v.fuelSlot]
+		for slot = 1, 16 do
+			local d = inv[slot]
+			if d and not ccInv.isChest(d.name) and slot ~= v.chestSlot
+				and not (fuel and d.name == fuel.name) then
+				names[#names + 1] = d.name
+			end
+		end
+		for _, name in ipairs(DEFAULTS.trash) do names[#names + 1] = name end
+		return names
+	end
+
+	local whereNames = { up = "le haut", down = "le bas", forward = "devant" }
+
+	local views = {
+		{ title = "Chantier",
+			fields = {
+				{ kind = "number", key = "width", label = "Largeur", min = 1, max = 256,
+					hint = "Devant la turtle" },
+				{ kind = "number", key = "depth", label = "Profondeur", min = 1, max = 256,
+					hint = "Sur le cote choisi" },
+				{ kind = "number", key = "height", label = "Hauteur", min = 1, max = 384,
+					hint = "Blocs a creuser" },
+				{ kind = "choice", key = "down", label = "Sens", options = {
+					{ true, "Bas", "Creuse sous la turtle" },
+					{ false, "Haut", "Creuse au-dessus" } } },
+				{ kind = "choice", key = "left", label = "Cote", options = {
+					{ false, "Droite", "Chantier a droite de la turtle" },
+					{ true, "Gauche", "Chantier a gauche de la turtle" } } },
+			},
+			after = function(v)
+				local job = ccPlan.new({ width = v.width, depth = v.depth, height = v.height })
+				return {
+					("%d blocs, %d couches"):format(ccPlan.blocks(job), ccPlan.layers(job)),
+					"Carburant estime ~" .. fuelEstimate(v),
+				}
+			end,
+		},
+		{ title = "Depot",
+			fields = {
+				{ kind = "choice", key = "chest", label = "Coffre", options = {
+					{ "auto", "Auto", "Portable si present, sinon fixe" },
+					{ "portable", "Portable", "Pose et reprend le coffre" },
+					{ "fixed", "Fixe", "Coffre contre l'origine" },
+					{ "none", "Aucun", "Pas de depot" } } },
+				{ kind = "choice", key = "chestSlot", label = "Slot coffre", options = SLOT_OPTIONS,
+					hint = "Ou ranger le coffre portable" },
+				{ kind = "choice", key = "dropWhenNoChest", label = "Sans coffre", options = {
+					{ false, "Attendre", "Attend qu'on vienne vider" },
+					{ true, "Jeter", "Depose au sol, perte assumee" } } },
+			},
+			after = function(v)
+				if v.chest == "none" then return { "Le butin reste a bord" } end
+				local lines = {}
+				if v.chest ~= "fixed" then
+					local slot, d = chestOf(v)
+					if not slot then
+						lines[#lines + 1] = { "Aucun coffre portable", v.chest == "portable" and colors.red or colors.orange }
+					elseif ccInv.isChest(d.name) then
+						lines[#lines + 1] = { ("Slot %d : %s"):format(slot, shortName(d.name)), colors.lime }
+					else
+						lines[#lines + 1] = { ("Slot %d : %s"):format(slot, shortName(d.name)), colors.orange }
+						lines[#lines + 1] = { "Doit garder son contenu !", colors.orange }
+					end
+				end
+				if v.chest ~= "portable" then
+					lines[#lines + 1] = "Fixe : derriere, dessus ou a "
+						.. (v.left and "droite" or "gauche")
+				end
+				return lines
+			end,
+		},
+		{ title = "Carbu",
+			fields = {
+				{ kind = "choice", key = "fuelSlot", label = "Slot fuel", options = SLOT_OPTIONS,
+					hint = "Ou ranger le carburant" },
+				{ kind = "number", key = "keepFuel", label = "Garder", min = 0, max = 1024, step = 16,
+					hint = "Combustible garde au vidage" },
+				{ kind = "number", key = "fuelMargin", label = "Marge", min = 0, max = 10000, step = 16,
+					hint = "En plus du trajet de retour" },
+				{ kind = "number", key = "fuelTopUp", label = "Recharge", min = 0, max = 100000, step = 500,
+					hint = "Niveau vise au coffre" },
+			},
+			after = function(v)
+				local d = inv[v.fuelSlot]
+				local level = ccFuel.isUnlimited() and "illimite"
+					or (ccFuel.level() .. " / " .. ccFuel.limit())
+				return {
+					d and ("Slot %d : %s x%d"):format(v.fuelSlot, shortName(d.name), d.count)
+						or { ("Slot %d vide"):format(v.fuelSlot), colors.orange },
+					"Niveau " .. level,
+				}
+			end,
+		},
+		{ title = "Rebut",
+			header = function(v)
+				return ("Coche = jete, %d jetes"):format(#v.trash)
+			end,
+			fields = {
+				{ kind = "choice", key = "trashWhere", label = "Jeter vers", options = {
+					{ "up", "Haut", "Dans la couche deja creusee" },
+					{ "down", "Bas", "Sous la turtle" },
+					{ "forward", "Devant", "Devant la turtle" } } },
+				{ kind = "set", key = "trash", items = trashItems, display = shortName,
+					tag = function(name) return inInventory(name) and "inv" or nil end,
+					hint = function(_, name) return name end,
+					add = "+ Saisir un nom", prefix = MINECRAFT },
+			},
+		},
+		{ title = "Lancer",
+			before = function(v)
+				local lines = {
+					("%dx%dx%d vers le %s, a %s"):format(v.width, v.depth, v.height,
+						v.down and "bas" or "haut", v.left and "gauche" or "droite"),
+				}
+				local need = fuelEstimate(v)
+				if ccFuel.isUnlimited() then
+					lines[#lines + 1] = "Carburant illimite"
+				elseif ccFuel.level() >= need then
+					lines[#lines + 1] = { "Carburant suffisant (~" .. need .. ")", colors.lime }
+				else
+					lines[#lines + 1] = { ("Carburant ~%d, niveau %d"):format(need, ccFuel.level()), colors.orange }
+				end
+				local depot = ({ auto = "auto", portable = "portable", fixed = "fixe", none = "aucun" })[v.chest]
+				lines[#lines + 1] = "Depot : " .. depot
+				lines[#lines + 1] = ("Rebut : %d, vers %s"):format(#v.trash, whereNames[v.trashWhere] or v.trashWhere)
+				return lines
+			end,
+			fields = {
+				{ kind = "check", key = "remember", label = "Memoriser les options",
+					hint = "Ecrites dans " .. CONFIG_PATH },
+				{ kind = "button", label = "Lancer le chantier", action = "submit",
+					hint = "Entree pour demarrer" },
+			},
+		},
+	}
+
+	return {
+		values = values,
+		views = views,
+		refresh = refresh,
+		validate = function(v)
+			if v.chest ~= "fixed" and v.chest ~= "none" and v.chestSlot == v.fuelSlot then
+				return "Coffre et carburant sur le meme slot"
+			end
+			return nil
+		end,
+	}, chestOf
+end
+
+--- Affiche le menu et en tire le chantier et ses options.
+-- @return job, options  ou nil si l'utilisateur a abandonné
+local function startMenu()
+	local spec, chestOf = menuSpec()
+	local v = ccMenu.new(spec):run()
+	if not v then return nil end
+
+	local options = {}
+	for _, key in ipairs(JOB_OPTIONS) do
+		if v[key] ~= nil then options[key] = v[key] end
+	end
+
+	-- Un conteneur non reconnu, désigné par son slot en mode portable, est
+	-- accepté sous son nom exact : il sera reconnu où qu'il soit rangé.
+	options.chestItem = ""
+	if v.chest == "portable" then
+		local slot, d = chestOf(v)
+		if slot and not ccInv.isChest(d.name) then options.chestItem = d.name end
+	end
+
+	if v.remember then
+		local changes = { lastJob = { width = v.width, depth = v.depth, height = v.height,
+			down = v.down, left = v.left } }
+		for k, val in pairs(options) do changes[k] = val end
+		local ok, err = ccConfig.set(CONFIG_PATH, changes)
+		if not ok then print("Options non memorisees : " .. tostring(err)) end
+	end
+
+	local job = ccPlan.new({ width = v.width, depth = v.depth, height = v.height,
+		down = v.down, left = v.left })
+	return job, options
+end
+
+--- Applique au chantier ses propres options, par-dessus le fichier.
+local function applyOptions(options)
+	for k, v in pairs(options or {}) do CONFIG[k] = v end
+end
+
+--- Transmet à ccInv ce qui dépend des options : rebut, emplacements, et
+--- coffre désigné à la main.
+local function configureInventory()
+	local names = copyList(ccInv.config().chestNames)
+	if CONFIG.chestItem ~= "" then names[#names + 1] = CONFIG.chestItem end
+	ccInv.configure({
+		trash = CONFIG.trash,
+		chestSlot = CONFIG.chestSlot,
+		fuelSlot = CONFIG.fuelSlot,
+		chestNames = names,
+	})
 end
 
 --- Construit le chantier à partir des arguments, ou le reprend.
@@ -1003,18 +1321,34 @@ local function setup(args)
 		return false
 	end
 
-	-- Reprise
+	-- Reprise, ou menu quand il n'y a rien à reprendre
 	if #args == 0 then
 		local saved, err = store.read()
 		if not saved then
-			if err ~= "absent" then print("Sauvegarde illisible : " .. tostring(err)) end
-			usage()
-			return false
+			if err ~= "absent" then
+				-- Une sauvegarde illisible n'est pas écrasée par un nouveau
+				-- chantier sans que l'utilisateur l'ait demandé.
+				print("Sauvegarde illisible : " .. tostring(err))
+				usage()
+				return false
+			end
+			local job, options = startMenu()
+			if not job then
+				print("Menu abandonne.")
+				usage()
+				return false
+			end
+			ctx.job, ctx.options, ctx.index = job, options, 1
+			applyOptions(options)
+			installStartup()
+			return true
 		end
 
 		ctx.job = ccPlan.new(saved.job)
 		ctx.origin = saved.origin
 		ctx.skips = saved.skips or 0
+		ctx.options = saved.options
+		applyOptions(saved.options)
 
 		if saved.legacy then
 			-- L'ancien format ne stockait pas de curseur : on le retrouve à
@@ -1138,6 +1472,8 @@ ccInv.reset({
 	chestPatterns = CONFIG.chestPatterns,
 })
 if not setup(args) then return end
+-- Après setup : le menu ou la sauvegarde ont pu changer les options.
+configureInventory()
 
 -- Sauvegarde à CHAQUE changement d'état suivi -- déplacement ET rotation --
 -- et pas seulement aux transitions de la machine.
@@ -1162,9 +1498,13 @@ if configCreated then journal("Options creees : " .. CONFIG_PATH) end
 for _, w in ipairs(configWarnings) do journal("Options : " .. w) end
 journal(("Rebut : %d entrees, sans coffre : %s")
 	:format(#CONFIG.trash, CONFIG.dropWhenNoChest and "jeter" or "attendre"))
+journal(("Chantier %dx%dx%d, %s, a %s, depot %s"):format(ctx.job.width, ctx.job.depth,
+	ctx.job.height, ctx.job.down and "bas" or "haut", ctx.job.left and "gauche" or "droite", CONFIG.chest))
 
 local chestSlot = ccInv.findChest()
-if chestSlot then
+if CONFIG.chest == "fixed" or CONFIG.chest == "none" then
+	journal("Coffre portable ignore (mode " .. CONFIG.chest .. ")")
+elseif chestSlot then
 	journal("Coffre reconnu slot " .. chestSlot .. " : " .. ccInv.detail(chestSlot).name)
 else
 	journal("AUCUN coffre reconnu -- la turtle attendra un vidage manuel")

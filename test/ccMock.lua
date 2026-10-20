@@ -1069,7 +1069,8 @@ function M.install()
 		end,
 	}
 	-- Codes des touches utilisées par les pages à navigation au clavier.
-	_G.keys = { up = 200, down = 208, left = 203, right = 205, enter = 28, backspace = 14 }
+	_G.keys = { up = 200, down = 208, left = 203, right = 205, enter = 28, backspace = 14,
+		tab = 15, leftShift = 42, rightShift = 54, numPadEnter = 156 }
 	_G.sleep = os_.sleep
 	_G.parallel = parallel_
 	_G.http = {

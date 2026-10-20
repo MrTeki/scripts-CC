@@ -197,3 +197,24 @@ H.case("remainingBlocks décroît strictement", function()
 	end
 	H.eq(last, 0, "zéro à la fin")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Côté
+-- ---------------------------------------------------------------------------
+
+H.case("a gauche, la profondeur s'etend vers -Y", function()
+	local job = ccPlan.new({ width = 3, depth = 2, height = 4, left = true })
+	for i = 1, ccPlan.total(job) do
+		local c = ccPlan.cellAt(job, i)
+		H.ok(c.y == 0 or c.y == -1, "rangee a gauche, index " .. i)
+		H.eq(ccPlan.indexOf(job, c), i, "aller-retour de l'index " .. i)
+	end
+	local z = ccPlan.cellAt(job, 1).z
+	H.isNil(ccPlan.indexOf(job, { x = 0, y = 1, z = z }), "la droite n'en fait pas partie")
+end)
+
+H.case("un chantier sans cote, comme les anciennes sauvegardes, est a droite", function()
+	local job = ccPlan.new({ width = 2, depth = 2, height = 3 })
+	H.eq(job.left, false, "droite par defaut")
+	H.eq(ccPlan.cellAt(job, 3).y, 1, "profondeur vers +Y")
+end)

@@ -62,9 +62,9 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | API | État | Contenu |
 |---|---|---|
 | `ccBoot` | fait | installe les APIs manquantes depuis le dépôt, manifeste, atomique |
-| `ccConfig` | fait | options dans un fichier Lua éditable en jeu, gabarit commenté, validation |
+| `ccConfig` | fait | options dans un fichier Lua éditable en jeu, gabarit commenté, validation, réécriture des seules valeurs modifiées |
 | `ccUtil` | fait | `roundTo`, `clamp`, `indexOf`, `contains`, `copy`, `count`, `findPeripheral(s)` |
-| `ccPlan` | fait | parcours en serpentin d'un volume, en couches ; progression exacte |
+| `ccPlan` | fait | parcours en serpentin d'un volume, en couches, à droite ou à gauche ; progression exacte |
 | `ccVec` | fait | position et direction, normalisation `dir % 4`, `turnsBetween` |
 | `ccNav` | fait | mouvement à contrat `ok, raison, bloc`, essais bornés, `goTo`, GPS |
 | `ccSave` | fait | persistance atomique, clés nommées, versionnée + migration |
@@ -72,6 +72,7 @@ Le code commun est extrait dans des APIs partagées, installées au premier lanc
 | `ccFuel` | fait | niveau normalisé (`"unlimited"`), budget de retour, ravitaillement au coffre |
 | `ccUi` | fait | journal à ring buffer, `drawBar`, boutons clavier/souris/tactile, moniteur |
 | `ccNet` | fait | sert `ccRemoteProtocol` sans bloquer, commandes mises en file |
+| `ccMenu` | fait | formulaire à onglets décrit par des données : nombres, choix, cases, listes à cocher, saisie ; clavier seul sur turtle normale, souris en plus sur turtle avancée |
 
 `ccQuarry.lua` les consomme toutes ; `ccChopper.lua` toutes sauf `ccPlan` et
 `ccNet`. `test/test_integration.lua` les valide ensemble, et
@@ -151,8 +152,13 @@ secret.
 
 ```
 wget https://raw.githubusercontent.com/MrTeki/scripts-CC/main/ccQuarry.lua ccQuarry
-ccQuarry 16 16 64
+ccQuarry
 ```
+
+Sans argument, `ccQuarry` ouvre un menu de démarrage : dimensions, sens, côté,
+mode de dépôt, slots du coffre et du carburant, liste de rebut. Tab change de
+vue, haut/bas de champ, gauche/droite de valeur, Entrée valide ; la souris marche
+aussi sur une turtle avancée. `ccQuarry 16 16 64` lance directement, sans menu.
 
 Même chose pour `ccChopper` et `ccFarmer`. Juste après une publication, GitHub peut servir
 l'ancienne version quelques minutes : son cache dure environ 5 minutes.

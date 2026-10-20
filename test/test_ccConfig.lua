@@ -139,3 +139,71 @@ H.case("le fichier est evalue sans acces aux globales", function()
 	H.eq(config.fuelMargin, 64, "valeurs par defaut")
 	H.eq(#warnings, 1, "refuse")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Écriture
+-- ---------------------------------------------------------------------------
+
+local EDITED = table.concat({
+	"-- en-tete",
+	"return {",
+	"    -- marge de retour",
+	"    fuelMargin = 64,  -- en blocs",
+	"",
+	"    trash = {",
+	"        \"minecraft:cobblestone\",",
+	"    },",
+	"}",
+	"",
+}, "\n")
+
+H.case("set remplace les valeurs a leur place, commentaires compris", function()
+	fresh()
+	mock.putFile(PATH, EDITED)
+	H.ok(ccConfig.set(PATH, { fuelMargin = 128, trash = { "a:b", "c:d" } }), "ecrit")
+
+	local text = mock.getFile(PATH)
+	H.contains(text, "-- en-tete", "en-tete conserve")
+	H.contains(text, "-- marge de retour", "commentaire conserve")
+	H.contains(text, "fuelMargin = 128,  -- en blocs", "valeur remplacee, fin de ligne intacte")
+	H.eq(text:find("cobblestone", 1, true), nil, "ancienne liste remplacee")
+
+	local config, warnings = ccConfig.load(PATH, DEFAULTS)
+	H.eq(#warnings, 0, "toujours lisible")
+	H.eq(config.fuelMargin, 128, "nombre relu")
+	H.eq(table.concat(config.trash, ","), "a:b,c:d", "liste relue")
+end)
+
+H.case("set ajoute une option absente avant l'accolade finale", function()
+	fresh()
+	mock.putFile(PATH, EDITED)
+	H.ok(ccConfig.set(PATH, { dropWhenNoChest = true, trashWhere = "down" }), "ecrit")
+
+	local config, warnings = ccConfig.load(PATH, DEFAULTS)
+	H.eq(#warnings, 0, "toujours lisible")
+	H.eq(config.dropWhenNoChest, true, "booleen ajoute")
+	H.eq(config.trashWhere, "down", "chaine ajoutee")
+	H.eq(config.fuelMargin, 64, "le reste intact")
+end)
+
+H.case("set ignore la cle quand elle n'apparait qu'en commentaire", function()
+	fresh()
+	mock.putFile(PATH, "-- fuelMargin = 1 dans un commentaire\nreturn {\n  fuelMargin = 64,\n}\n")
+	ccConfig.set(PATH, { fuelMargin = 9 })
+
+	local text = mock.getFile(PATH)
+	H.contains(text, "-- fuelMargin = 1 dans un commentaire", "commentaire intact")
+	H.eq(ccConfig.load(PATH, DEFAULTS).fuelMargin, 9, "la vraie option est modifiee")
+end)
+
+H.case("set cree le fichier s'il n'existe pas", function()
+	fresh()
+	H.ok(ccConfig.set(PATH, { fuelMargin = 5 }), "ecrit")
+	H.eq(ccConfig.load(PATH, DEFAULTS).fuelMargin, 5, "relu")
+end)
+
+H.case("serialize : chaines echappees, tables a cles sur une ligne", function()
+	H.eq(ccConfig.serialize('a "b"'), '"a \\"b\\""', "chaine")
+	H.eq(ccConfig.serialize({ width = 2, down = true }), "{ down = true, width = 2 }", "table a cles")
+	H.eq(ccConfig.serialize({}), "{}", "table vide")
+end)

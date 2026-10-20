@@ -64,13 +64,123 @@ end
 -- Arguments
 -- ---------------------------------------------------------------------------
 
-H.case("sans argument ni sauvegarde : aide, et rien n'est touché", function()
+H.case("sans argument ni sauvegarde : menu, et Ctrl+T n'y touche à rien", function()
 	terrain()
+	os.queueEvent("terminate")
 	local sorties = run()
 
+	H.contains(table.concat(sorties, "\n"), "Menu abandonne", "abandon annoncé")
 	H.contains(table.concat(sorties, "\n"), "ccQuarry <largeur>", "aide affichée")
 	H.eq(mock.getTurtle().z, 0, "la turtle n'a pas bougé")
 	H.eq(fs.exists("ccquarry.save"), false, "aucune sauvegarde créée")
+end)
+
+--- Touches qui règlent les dimensions dans la vue Chantier, champ Largeur actif.
+local function dimensions(w, d, h)
+	local out = {}
+	for i, n in ipairs({ w, d, h }) do
+		if i > 1 then out[#out + 1] = { "key", keys.down } end
+		for ch in tostring(n):gmatch(".") do out[#out + 1] = { "char", ch } end
+	end
+	return out
+end
+
+--- Met des événements en file, avant de lancer le script.
+local function touches(...)
+	for _, list in ipairs({ ... }) do
+		for _, e in ipairs(list) do os.queueEvent(table.unpack(e)) end
+	end
+end
+
+-- Vue Lancer, puis le bouton sous la case « Mémoriser ».
+-- Fonction : `keys` n'existe qu'une fois le mock installé.
+local function lancer()
+	return {
+		{ "key", keys.tab }, { "key", keys.tab }, { "key", keys.tab }, { "key", keys.tab },
+		{ "key", keys.down }, { "key", keys.enter },
+	}
+end
+
+H.case("le menu lance un chantier au clavier et mémorise ses dimensions", function()
+	terrain({ width = 2, depth = 2, height = 3 })
+	touches(dimensions(2, 2, 3), lancer())
+	local sorties = run()
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier mené à terme")
+	H.eq(restants(2, 2, 3), 0, "tout le volume est creusé")
+
+	local cfg = mock.getFile("ccquarry.cfg")
+	H.contains(cfg, "height = 3", "dimensions mémorisées")
+	H.contains(cfg, "-- Mode de depot", "commentaires du gabarit conservés")
+	H.eq((mock.getFile("ccquarry.log") or ""):find("Options :", 1, true), nil,
+		"le fichier réécrit se relit sans avertissement")
+end)
+
+H.case("le menu peut placer le chantier à GAUCHE de la turtle", function()
+	mock.install()
+	mock.getTurtle().fuel = 5000
+	mock.setSlot(1, "minecraft:coal", 32)
+	mock.setSlot(16, ENDER, 1)
+	mock.fill(0, -1, -6, 1, 0, -1, "minecraft:stone")
+	mock.setBlock(0, 1, -1, "minecraft:iron_ore")    -- à droite : hors chantier
+
+	touches(dimensions(2, 2, 3),
+		{ { "key", keys.down }, { "key", keys.down }, { "key", keys.right } }, lancer())
+	local sorties = run()
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier mené à terme")
+	for _, p in ipairs({ { 0, -1, -1 }, { 1, -1, -2 }, { 1, 0, -2 } }) do
+		H.isNil(mock.getBlock(p[1], p[2], p[3]), "creusé en " .. table.concat(p, ","))
+	end
+	H.ok(mock.getBlock(0, 1, -1), "la droite est intacte")
+	H.contains(mock.getFile("ccquarry.cfg"), "left = true", "côté mémorisé")
+end)
+
+H.case("les options du menu non mémorisées survivent à une reprise", function()
+	-- Sans coffre, la turtle finit par attendre : Ctrl+T la trouve là.
+	terrain({ width = 2, depth = 2, height = 3, noChest = true, ore = { { 1, 1, -1 } } })
+	-- Dépôt portable seulement, sans mémoriser.
+	touches(dimensions(2, 2, 3), {
+		{ "key", keys.tab }, { "key", keys.right },
+		{ "key", keys.tab }, { "key", keys.tab }, { "key", keys.tab },
+		{ "key", keys.enter }, { "key", keys.down }, { "key", keys.enter },
+		{ "terminate" },
+	})
+	run()
+
+	H.ok(fs.exists("ccquarry.save"), "chantier sauvegardé")
+	H.eq(mock.getFile("ccquarry.cfg"):find('chest = "portable"', 1, true), nil,
+		"rien d'écrit dans les options")
+
+	-- Reprise, coffre fourni : l'option vient de la sauvegarde, pas du fichier.
+	mock.setSlot(16, ENDER, 1)
+	mock.putFile("ccquarry.log", "")
+	local sorties = run()
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "reprise menée à terme")
+	H.contains(mock.getFile("ccquarry.log"), "depot portable", "option reprise de la sauvegarde")
+end)
+
+H.case("chest = fixed ignore le coffre portable", function()
+	terrain({ width = 2, depth = 2, height = 3, ore = { { 1, 1, -1 } } })
+	mock.setChest(-1, 0, 0, {}, 27)
+	mock.putFile("ccquarry.cfg", 'return { chest = "fixed" }')
+
+	run("2", "2", "3")
+	local trouve = false
+	for _, pile in pairs(mock.getBlock(-1, 0, 0).inventory) do
+		if pile.name == "minecraft:iron_ore" then trouve = true end
+	end
+	H.ok(trouve, "le minerai est dans le coffre fixe")
+end)
+
+H.case("chest = none : ni coffre portable ni coffre fixe", function()
+	terrain({ width = 2, depth = 2, height = 3, ore = { { 1, 1, -1 } } })
+	mock.setChest(-1, 0, 0, {}, 27)
+	mock.putFile("ccquarry.cfg", 'return { chest = "none", dropWhenNoChest = true }')
+
+	run("2", "2", "3")
+	H.isNil(mock.getBlock(-1, 0, 0).inventory[1], "le coffre fixe reste vide")
+	H.eq(mock.groundCount("minecraft:iron_ore"), 1, "butin jeté, comme demandé")
 end)
 
 H.case("argument non numérique : refus explicite", function()

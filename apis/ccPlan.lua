@@ -23,13 +23,15 @@
 -- index, quelle que soit la position réelle.
 --
 -- Conventions du projet : X / Y horizontaux, Z vertical.
+-- La largeur s'étend devant la turtle (+X), la profondeur à sa droite (+Y), ou
+-- à sa gauche (-Y) avec `left`.
 -- Une « cellule » est une position de PARCOURS, pas un bloc : la turtle y
 -- creuse aussi au-dessus et au-dessous, soit `thickness` blocs par cellule.
 
-local M = { _VERSION = 1 }
+local M = { _VERSION = 2 }
 
 --- Décrit un chantier.
--- @param o { width, depth, height, down = true, thickness = 3 }
+-- @param o { width, depth, height, down = true, left = false, thickness = 3 }
 function M.new(o)
 	assert(o.width and o.width > 0, "largeur invalide")
 	assert(o.depth and o.depth > 0, "profondeur invalide")
@@ -40,6 +42,8 @@ function M.new(o)
 		depth = math.floor(o.depth),
 		height = math.floor(o.height),
 		down = o.down ~= false,
+		-- Absent des sauvegardes antérieures : nil vaut donc « à droite ».
+		left = o.left == true,
 		thickness = o.thickness or 3,
 	}
 end
@@ -109,7 +113,7 @@ function M.cellAt(job, index)
 
 	local band = M.layerAt(job, layer)
 	return {
-		x = col, y = row, z = band.z,
+		x = col, y = job.left and -row or row, z = band.z,
 		layer = layer,
 		digUp = band.digUp,
 		digDown = band.digDown,
@@ -121,12 +125,13 @@ end
 function M.indexOf(job, pos)
 	local layer = M.layerOf(job, pos.z)
 	if not layer then return nil end
+	local row = job.left and -pos.y or pos.y
 	if pos.x < 0 or pos.x >= job.width then return nil end
-	if pos.y < 0 or pos.y >= job.depth then return nil end
+	if row < 0 or row >= job.depth then return nil end
 
 	local col = pos.x
-	if pos.y % 2 == 1 then col = job.width - 1 - col end
-	local rest = pos.y * job.width + col
+	if row % 2 == 1 then col = job.width - 1 - col end
+	local rest = row * job.width + col
 
 	local perLayer = M.perLayer(job)
 	if layer % 2 == 1 then rest = perLayer - 1 - rest end
