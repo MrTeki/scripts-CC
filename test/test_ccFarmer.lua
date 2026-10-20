@@ -675,3 +675,71 @@ H.case("RÉGRESSION ccFarmer : une tige non attachée ne fait pas d'un bloc un f
 	runWaiting()
 	H.eq(getCrop(1, 1).name, "minecraft:torch", "torche laissée en place")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Position décalée : vérification au coffre, recherche, journal
+-- ---------------------------------------------------------------------------
+
+local LOG, LOG_OLD = "ccfarmer.log", "ccfarmer.old"
+
+local function wall(sx, sy)
+	local x, y = at(sx, sy)
+	mock.setBlock(x, y, 0, "minecraft:stone")
+end
+
+H.case("RÉGRESSION ccFarmer : décalée hors du champ contre un mur, elle se recale", function()
+	-- Le cas rapporté : sauvegarde en (0,4) cap +x, case 53/80, turtle en
+	-- réalité en (0,5) sur la bordure, un mur devant. L'ancienne version
+	-- réessayait ce pas indéfiniment.
+	field()
+	wall(1, 5)
+	setCrop(2, 4, wheat(7))
+	putTurtle(0, 5, 1)
+	writeState({ x = 0, y = 4, dir = 1, tours = 50, stats = {},
+		inTour = true, idx = 53, outward = true, recals = 2 })
+	runWaiting()
+
+	local st = savedState()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(st.recals, 3, "recalage compté")
+	H.eq(st.tours, 51, "tournée terminée")
+	H.eq(getCrop(2, 4).state.age, 0, "la suite de la tournée est au bon endroit")
+	H.contains(mock.getFile(LOG_OLD) or "", "recalage", "incident gardé au journal")
+end)
+
+H.case("ccFarmer : un vrai obstacle fait sauter la case, sans se croire perdue", function()
+	field()
+	wall(1, 1)                   -- deuxième case de la spirale
+	setCrop(1, 0, wheat(7))      -- troisième case
+	runWaiting()
+
+	local st = savedState()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(st.tours, 1, "tournée terminée")
+	H.isNil(st.recals, "aucun recalage : la position était bonne")
+	H.eq(getCrop(1, 0).state.age, 0, "les autres cases sont faites")
+	H.contains(mock.getFile(LOG_OLD) or "", "inaccessible", "case sautée au journal")
+end)
+
+H.case("ccFarmer : monde revenu en arrière, détecté au fuel et corrigé", function()
+	-- La sauvegarde a vu le fuel à 4000 ; le monde rechargé dit 5000 : la
+	-- turtle est revenue à un état plus ancien, ici une case avant le coffre.
+	field()
+	putTurtle(0, 1, 2)
+	writeState({ x = 0, y = 0, dir = 2, tours = 3, stats = {}, fuel = 4000 })
+	runWaiting()
+
+	local st = savedState()
+	H.ok(onChest(), "revenue sur le coffre")
+	H.eq(st.recals, 1, "recalée")
+	H.eq(st.tours, 4, "la tournée a eu lieu")
+	H.contains(mock.getFile(LOG_OLD) or "", "arriere", "cause au journal")
+end)
+
+H.case("ccFarmer : sans incident, le journal est vidé au coffre", function()
+	field()
+	setCrop(0, 1, wheat(7))
+	runWaiting()
+	H.eq(fs.exists(LOG), false, "journal vidé")
+	H.eq(fs.exists(LOG_OLD), false, "rien à garder")
+end)

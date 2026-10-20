@@ -20,6 +20,11 @@ local MIN_FREE_SLOTS = 2          -- slots libres requis avant de récolter (ex.
 local MOVE_TRIES     = 5          -- essais avant d'afficher "bloqué"
 local RETRY_DELAY    = 2          -- secondes entre deux essais / vérifications
 local SAVE_FILE      = "ccfarmer.dat"
+local LOG_FILE       = "ccfarmer.log"
+local LOG_OLD        = "ccfarmer.old"   -- dernier journal contenant un incident
+local LOG_MAX        = 16 * 1024        -- plafond, si le coffre n'est jamais revu
+local SEARCH_RADIUS  = 2          -- rayon de recherche du coffre quand il n'est pas où prévu
+local LOST_RETRY     = 5 * 60     -- secondes entre deux essais quand la position est perdue
 local STARTUP        = 'shell.run("ccFarmer")\n'
 
 local args = { ... }
@@ -109,6 +114,9 @@ local QUIT    = {}   -- valeur d'erreur sentinelle pour un arrêt propre
 -- Sauvegarde (écriture atomique)
 ------------------------------------------------------------
 local function save()
+  -- Le fuel fait partie du monde : plus haut au redémarrage qu'ici, il
+  -- trahit un monde revenu en arrière (plantage, arrêt brutal).
+  state.fuel = turtle.getFuelLevel()
   local tmp = SAVE_FILE .. ".tmp"
   local f = fs.open(tmp, "w")
   f.write(textutils.serialize(state))
@@ -171,6 +179,37 @@ end
 -- Utilitaires
 ------------------------------------------------------------
 local function setStatus(text) ui.status = text end
+
+------------------------------------------------------------
+-- Journal : uniquement ce qui sort de l'ordinaire
+------------------------------------------------------------
+-- Effacé à chaque confirmation du coffre, pour rester petit. Un journal
+-- qui contient un incident est gardé à part (LOG_OLD) au lieu d'être
+-- effacé : sinon le recalage effacerait justement la trace de l'incident.
+local function log(msg, incident)
+  if incident then state.incident = true end
+  if fs.exists(LOG_FILE) and fs.getSize(LOG_FILE) > LOG_MAX then
+    if fs.exists(LOG_OLD) then fs.delete(LOG_OLD) end
+    fs.move(LOG_FILE, LOG_OLD)
+  end
+  local f = fs.open(LOG_FILE, "a")
+  if not f then return end
+  f.write(("%s T%d c%d (%d,%d) d%d fuel %s : %s\n"):format(
+    os.date("%d/%m %H:%M:%S"), state.tours + 1, state.idx or 0,
+    state.x, state.y, state.dir, tostring(turtle.getFuelLevel()), msg))
+  f.close()
+end
+
+-- La turtle est sûre d'être au-dessus du coffre : le journal repart à zéro.
+local function chestConfirmed()
+  if state.incident then
+    if fs.exists(LOG_OLD) then fs.delete(LOG_OLD) end
+    if fs.exists(LOG_FILE) then fs.move(LOG_FILE, LOG_OLD) end
+    state.incident = nil
+  elseif fs.exists(LOG_FILE) then
+    fs.delete(LOG_FILE)
+  end
+end
 
 local function fuelLevel()
   local f = turtle.getFuelLevel()
@@ -265,8 +304,10 @@ local function face(d)
   elseif diff == 3 then turnLeft() end
 end
 
--- Avance d'une case ; ne creuse jamais, réessaie en cas d'obstacle
-local function forward()
+-- Avance d'une case ; ne creuse jamais, réessaie en cas d'obstacle.
+-- Avec maxTries, abandonne après autant d'échecs et retourne false. La
+-- panne sèche ne compte pas : rien ne la résoudrait.
+local function forward(maxTries)
   local tries = 0
   while true do
     checkpoint()
@@ -281,25 +322,39 @@ local function forward()
       return
     end
     state.pending = nil
-    tries = tries + 1
     if fuelLevel() == 0 then
       ui.alert = "Plus de fuel !"
-    elseif tries >= MOVE_TRIES then
+    else
+      tries = tries + 1
       ui.alert = ("Bloque en (%d,%d)"):format(state.x, state.y)
+      if maxTries and tries >= maxTries then return false end
     end
     sleep(RETRY_DELAY)
   end
 end
 
-local function goTo(tx, ty)
-  while state.x ~= tx do
-    face(tx > state.x and 1 or 3)
-    forward()
+local function straightTo(tx, ty, maxTries, yFirst)
+  for pass = 1, 2 do
+    if (pass == 1) ~= (yFirst == true) then
+      while state.x ~= tx do
+        face(tx > state.x and 1 or 3)
+        if forward(maxTries) == false then return false end
+      end
+    else
+      while state.y ~= ty do
+        face(ty > state.y and 0 or 2)
+        if forward(maxTries) == false then return false end
+      end
+    end
   end
-  while state.y ~= ty do
-    face(ty > state.y and 0 or 2)
-    forward()
-  end
+  return true
+end
+
+-- Retourne false si un pas reste bloqué (avec maxTries). Bloquée, la turtle
+-- essaie l'autre ordre des axes, ce qui contourne un obstacle en coin.
+local function goTo(tx, ty, maxTries)
+  if straightTo(tx, ty, maxTries, false) then return true end
+  return straightTo(tx, ty, maxTries, true)
 end
 
 local function chestBelow() return getChest() ~= nil end
@@ -330,15 +385,75 @@ local function recover()
 
   state.pending = nil
   setStatus("Reprise : verification de la position")
+  log("Reprise sur un mouvement incertain : " .. p.kind, true)
   for _, h in ipairs({ done, here }) do
     state.x, state.y, state.dir = h.x, h.y, h.dir
     save()
-    goTo(0, 0)
-    if chestBelow() then return true end
-    goTo(h.x, h.y)
+    -- Bornés : une hypothèse fausse mène hors du champ, souvent dans un mur.
+    if goTo(0, 0, MOVE_TRIES) and chestBelow() then return true end
+    if not goTo(h.x, h.y, MOVE_TRIES) then return false end
     face(h.dir)
   end
   return false
+end
+
+local searchCells = buildSpiral(SEARCH_RADIUS)
+
+-- Rentre au coffre et vérifie qu'il est dessous. Sinon, la position est
+-- décalée : la turtle cherche le coffre autour d'elle et s'y recale.
+-- Retourne "home" (coffre où prévu), "found" (recalée) ou false.
+local function relocate(reason)
+  setStatus("Verification de la position")
+  log("Verification de la position : " .. reason, true)
+  if goTo(0, 0, MOVE_TRIES) and chestBelow() then
+    log("Coffre a sa place")
+    return "home"
+  end
+  local cx, cy = state.x, state.y
+  for _, o in ipairs(searchCells) do
+    checkpoint()
+    if goTo(cx + o.x, cy + o.y, 2) and chestBelow() then
+      log(("Coffre trouve en (%d,%d) : recalage"):format(state.x, state.y), true)
+      state.x, state.y = 0, 0
+      state.recals = (state.recals or 0) + 1
+      save()
+      return "found"
+    end
+  end
+  log("Coffre introuvable autour", true)
+  return false
+end
+
+-- Vérifie la position ; introuvable, la turtle ne travaille plus à
+-- l'aveugle et réessaie de loin en loin -- un animal posé sur le coffre ou
+-- devant finit par partir. Ne rend la main qu'une fois le coffre retrouvé.
+local function ensureLocated(reason)
+  local found = relocate(reason)
+  if found then return found end
+  ui.lost = true
+  log("Position perdue", true)
+  save()
+  while true do
+    setStatus("Nouvel essai dans 5 min")
+    for _ = 1, LOST_RETRY / RETRY_DELAY do
+      checkpoint()
+      sleep(RETRY_DELAY)
+    end
+    found = relocate("nouvel essai")
+    if found then
+      ui.lost = nil
+      return found
+    end
+  end
+end
+
+-- Déplacement d'usage : bloquée, la turtle vérifie sa position au coffre
+-- puis réessaie. Retourne false si la destination reste inaccessible
+-- alors que la position est confirmée -- un vrai obstacle.
+local function travel(tx, ty)
+  if goTo(tx, ty, MOVE_TRIES) then return true end
+  ensureLocated(("bloquee vers (%d,%d)"):format(tx, ty))
+  return goTo(tx, ty, MOVE_TRIES)
 end
 
 ------------------------------------------------------------
@@ -349,8 +464,9 @@ local function deposit()
   while true do
     checkpoint()
     if not getChest() then
-      setStatus("Coffre introuvable : ccFarmer recal ?")
+      ensureLocated("pas de coffre au retour")
     else
+      chestConfirmed()
       for s = 1, 16 do
         local d = turtle.getItemDetail(s)
         if d then
@@ -545,6 +661,7 @@ local function workCell(c)
   -- du coffre, sa position est décalée. Elle s'y recale au lieu de travailler
   -- la case -- c'est ainsi qu'un coffre a été miné.
   if ok and getChest() then
+    log(("Coffre sous la case (%d,%d) : recalage"):format(state.x, state.y), true)
     state.x, state.y = 0, 0
     state.recals = (state.recals or 0) + 1   -- affiché : signe d'un décalage
     save()
@@ -630,10 +747,10 @@ end
 local function returnTrip()
   local c = cellAt(state.idx)
   setStatus("Inventaire plein : retour au coffre")
-  goTo(0, 0)
+  travel(0, 0)
   deposit()
   ensureFuel()
-  goTo(c.x, c.y)
+  travel(c.x, c.y)
 end
 
 local function runTour()
@@ -645,9 +762,13 @@ local function runTour()
   while state.idx <= #spiral do
     local c = cellAt(state.idx)
     setStatus(("Tournee %d : case %d/%d"):format(state.tours + 1, state.idx, #spiral))
-    goTo(c.x, c.y)
-    checkpoint()
-    if workCell(c) then
+    if not travel(c.x, c.y) then
+      -- Vrai obstacle, position confirmée : la case attendra la tournée
+      -- suivante, plutôt que de bloquer la ferme.
+      log(("Case (%d,%d) inaccessible : sautee"):format(c.x, c.y), true)
+      state.idx = state.idx + 1
+      save()
+    elseif workCell(c) then
       state.idx = state.idx + 1
       save()
     else
@@ -655,7 +776,7 @@ local function runTour()
     end
   end
   setStatus("Retour au coffre")
-  goTo(0, 0)
+  travel(0, 0)
   state.inTour = false
   state.outward = not state.outward
   state.tours = state.tours + 1
@@ -667,18 +788,22 @@ end
 -- Boucle principale (seule à commander la turtle)
 ------------------------------------------------------------
 local function mainLoop()
-  if not recover() then
-    ui.alert = "Position perdue : ccFarmer recal"
-    setStatus("Reposer la turtle sur le coffre")
-    while true do
-      checkpoint()
-      sleep(RETRY_DELAY)
-    end
+  local fuelNow = turtle.getFuelLevel()
+  log(("Demarrage : fuel attendu %s, en suspens %s"):format(
+    tostring(state.fuel), state.pending and state.pending.kind or "rien"))
+  if type(fuelNow) == "number" and type(state.fuel) == "number"
+     and fuelNow > state.fuel then
+    -- Le monde est revenu en arrière : la turtle est quelque part sur son
+    -- trajet passé, sa sauvegarde ne le sait pas.
+    state.pending = nil
+    ensureLocated("monde revenu en arriere")
+  elseif not recover() then
+    ensureLocated("reprise impossible")
   end
   if state.inTour then
     runTour()        -- reprise après redémarrage
   else
-    goTo(0, 0)
+    travel(0, 0)
   end
   while true do
     deposit()
@@ -729,6 +854,7 @@ local function draw()
 
   local y = 4
   if ui.fuelLow then line(y, "! Reserve de fuel faible", colors.orange) y = y + 1 end
+  if ui.lost then line(y, "! Position perdue : ccFarmer recal", colors.red) y = y + 1 end
   if ui.alert then line(y, "! " .. ui.alert, colors.red) y = y + 1 end
   if state.recals then
     line(y, "! Recale sur le coffre : " .. state.recals .. " fois", colors.orange)
