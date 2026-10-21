@@ -90,11 +90,16 @@ H.case("findChest renvoie nil quand le coffre a disparu", function()
 	H.isNil(ccInv.findChest(), "coffre perdu")
 end)
 
-H.case("findChest reconnaît aussi l'ender chest vanilla", function()
+H.case("l'ender chest vanilla n'est ni un coffre portable ni un dépôt", function()
+	-- Vérifié en jeu : la turtle n'y dépose rien, et le casser ne rend que de
+	-- l'obsidienne. Les motifs « ender_chest » et « chest » l'attrapaient,
+	-- y compris ceux des fichiers d'options déjà écrits.
 	fresh()
+	ccInv.configure({ chestPatterns = { "ender_chest" }, depotPatterns = { "chest" } })
 	mock.setSlot(5, "minecraft:ender_chest", 1)
-	-- Identifiant absent de la liste de ccQuarry.
-	H.eq(ccInv.findChest(), 5, "vanilla")
+	H.isNil(ccInv.findChest(), "pas un coffre portable")
+	H.eq(ccInv.isDepot("minecraft:ender_chest"), false, "pas un dépôt")
+	H.eq(ccInv.isChest("enderstorage:ender_chest"), true, "celui d'EnderStorage, si")
 end)
 
 H.case("findChest reconnaît un ender chest d'un mod imprévu", function()

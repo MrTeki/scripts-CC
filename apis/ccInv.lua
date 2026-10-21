@@ -28,7 +28,7 @@
 -- qui appartient à ccFuel, lequel dépend déjà de ccInv. L'appelant fournit
 -- donc l'ensemble des slots à préserver.
 
-local M = { _VERSION = 1 }
+local M = { _VERSION = 2 }
 
 local SIZE = 16
 local MAX_STACK = 64
@@ -44,8 +44,16 @@ local DEFAULTS = {
 		"EnderStorage:enderChest",
 		"enderstorage:ender_storage",
 		"enderstorage:ender_chest",
-		"minecraft:ender_chest",
 	},
+
+	-- Blocs qui ont l'air de conteneurs sans en être pour la turtle, exclus
+	-- AVANT tout motif. L'ender chest vanilla en est l'exemple : son contenu
+	-- appartient au joueur, la turtle n'y dépose rien -- turtle.drop() jette
+	-- alors l'objet au sol en « réussissant » -- et le casser ne rend que de
+	-- l'obsidienne, pas le coffre. Vérifié en jeu. Les motifs « ender_chest »
+	-- et « chest » l'attrapaient pourtant, y compris dans les fichiers
+	-- d'options déjà écrits : d'où une exclusion, plutôt qu'un motif retiré.
+	notContainers = { "minecraft:ender_chest" },
 
 	-- Motifs de repli, cherchés dans l'identifiant en minuscules. Une liste de
 	-- noms exacts ne peut pas suivre les identifiants de tous les mods.
@@ -252,8 +260,15 @@ end
 -- Coffres
 -- ---------------------------------------------------------------------------
 
+local function excluded(name)
+	for _, n in ipairs(config.notContainers or {}) do
+		if name == n then return true end
+	end
+	return false
+end
+
 function M.isChest(name)
-	if not name then return false end
+	if not name or excluded(name) then return false end
 	for _, exact in ipairs(config.chestNames) do
 		if name == exact then return true end
 	end
@@ -280,7 +295,7 @@ local DROPS    = { forward = "drop",    up = "dropUp",    down = "dropDown" }
 local INSPECTS = { forward = "inspect", up = "inspectUp", down = "inspectDown" }
 
 function M.isDepot(name)
-	if not name then return false end
+	if not name or excluded(name) then return false end
 	local lowered = name:lower()
 	for _, pattern in ipairs(config.depotPatterns or {}) do
 		if lowered:find(pattern, 1, true) then return true end

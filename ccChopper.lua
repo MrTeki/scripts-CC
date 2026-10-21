@@ -42,7 +42,7 @@ local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
 -- Version du script, comparée à celle du manifeste par `update`. À incrémenter,
 -- ici ET dans manifest.lua, à chaque publication qui doit atteindre les turtles.
-local VERSION = 1
+local VERSION = 2
 
 -- Version minimale de ccBoot : la première qui sait mettre à jour le script.
 local BOOT = 2
@@ -51,7 +51,7 @@ local BOOT = 2
 -- ccUtil n'est pas utilisé ici, mais ccUi le requiert -- l'oublier faisait
 -- planter le premier lancement sur une turtle neuve.
 local NEEDS = {
-	ccUtil = 1, ccVec = 1, ccNav = 1, ccInv = 1, ccConfig = 1,
+	ccUtil = 1, ccVec = 1, ccNav = 1, ccInv = 2, ccConfig = 1,
 	ccFuel = 2, ccSave = 1, ccUi = 2,
 }
 

@@ -16,7 +16,7 @@ return {
 		ccVec   = { version = 1, path = "apis/ccVec.lua" },
 		ccPlan  = { version = 2, path = "apis/ccPlan.lua" },
 		ccNav   = { version = 1, path = "apis/ccNav.lua" },
-		ccInv   = { version = 1, path = "apis/ccInv.lua" },
+		ccInv   = { version = 2, path = "apis/ccInv.lua" },
 		ccFuel  = { version = 2, path = "apis/ccFuel.lua" },
 		ccSave  = { version = 1, path = "apis/ccSave.lua" },
 		ccUi    = { version = 2, path = "apis/ccUi.lua" },
@@ -27,8 +27,8 @@ return {
 	-- `version` : celle que déclare le script (`local VERSION = n`).
 	-- `<script> update` le réinstalle quand celle du dépôt est plus récente.
 	scripts = {
-		ccQuarry    = { version = 1, path = "ccQuarry.lua" },
-		ccChopper   = { version = 1, path = "ccChopper.lua" },
+		ccQuarry    = { version = 2, path = "ccQuarry.lua" },
+		ccChopper   = { version = 2, path = "ccChopper.lua" },
 		ccStairs    = { path = "ccStairs.lua" },
 		ccFarm      = { path = "ccFarm.lua" },
 		ccFarmer    = { path = "ccFarmer.lua" },
