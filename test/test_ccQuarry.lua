@@ -380,6 +380,92 @@ H.case("avec un coffre portable, la turtle vide SUR PLACE sans remonter", functi
 	H.ok(mock.getTurtle().inv[16], "l'ender chest est revenu en inventaire")
 end)
 
+H.case("en manque de carburant, le coffre portable est fouille SUR PLACE", function()
+	-- Le mock ne partage pas le contenu des ender chests : la fouille est
+	-- simulée, comme si l'autre bout du réseau contenait du charbon.
+	local ccFuel = require("ccFuel")
+	terrain({ width = 6, depth = 6, height = 12, fuel = 150 })
+	mock.setSlot(1, nil)
+
+	local fouilles, positions = 0, {}
+	local vrai = ccFuel.refuelFromChest
+	ccFuel.refuelFromChest = function()
+		fouilles = fouilles + 1
+		local t = mock.getTurtle()
+		positions[#positions + 1] = t.z
+		t.fuel = t.fuel + 1000
+		return true
+	end
+	local ok, err = pcall(run, "6", "6", "12")
+	ccFuel.refuelFromChest = vrai
+	if not ok then error(err, 0) end
+
+	local auFond = 0
+	for _, z in ipairs(positions) do
+		if z < 0 then auFond = auFond + 1 end
+	end
+	H.ok(auFond >= 1, "au moins une fouille au fond, pas a l'origine")
+	H.eq(retours(), 1, "un seul retour : celui de fin de chantier")
+	H.eq(restants(6, 6, 12), 0, "tout le volume est creuse")
+end)
+
+H.case("la garde carburant EN TRAJET fait aussi fouiller le coffre sur place", function()
+	-- La garde de ccNav refuse un mouvement avant que MINAGE n'ait pu tester
+	-- quoi que ce soit. On la simule au dixieme trajet, reservoir vide.
+	local ccFuel = require("ccFuel")
+	local ccNav = require("ccNav")
+	terrain({ width = 3, depth = 3, height = 6 })
+	mock.setSlot(1, nil)
+
+	local fouilles = {}
+	local vraiFouille, vraiGoTo = ccFuel.refuelFromChest, ccNav.goTo
+	ccFuel.refuelFromChest = function()
+		local t = mock.getTurtle()
+		fouilles[#fouilles + 1] = t.z
+		t.fuel = t.fuel + 1000
+		return true
+	end
+	local trajets = 0
+	ccNav.goTo = function(...)
+		trajets = trajets + 1
+		if trajets == 10 then
+			mock.getTurtle().fuel = 0
+			return false, "denied"
+		end
+		return vraiGoTo(...)
+	end
+	local ok, err = pcall(run, "3", "3", "6")
+	ccFuel.refuelFromChest, ccNav.goTo = vraiFouille, vraiGoTo
+	if not ok then error(err, 0) end
+
+	H.eq(#fouilles, 1, "une fouille")
+	H.ok(fouilles[1] < 0, "au fond, la ou la garde a refuse")
+	H.eq(retours(), 1, "un seul retour : celui de fin de chantier")
+	H.eq(restants(3, 3, 6), 0, "tout le volume est creuse")
+end)
+
+H.case("un coffre sans combustible n'est plus fouille a chaque passage", function()
+	-- Signale en relisant le code : le coffre etait fouille a chaque passage
+	-- des que le niveau etait sous fuelTopUp, donc presque toujours.
+	local ccFuel = require("ccFuel")
+	local fouilles = 0
+	local vrai = ccFuel.refuelFromChest
+	local positions = ouVidage('return { trash = {}, chest = "fixed" }', 4, 4, 12, function()
+		mock.setChest(-1, 0, 0, {}, 27 * 4)
+		-- Sous fuelTopUp et sans charbon a bord : la fouille a lieu.
+		mock.setSlot(1, nil)
+		mock.getTurtle().fuel = 1500
+		ccFuel.refuelFromChest = function(...)
+			fouilles = fouilles + 1
+			return vrai(...)
+		end
+	end)
+	ccFuel.refuelFromChest = vrai
+
+	H.ok(#positions > 2, "plusieurs passages au coffre : " .. #positions)
+	H.eq(fouilles, 1, "une seule fouille, celle qui montre qu'il n'y a rien")
+end)
+
 H.case("avec un coffre fixe seulement, la turtle rentre toujours a l'origine", function()
 	local positions = ouVidage('return { trash = {}, chest = "fixed" }', 4, 4, 12, function()
 		mock.setChest(-1, 0, 0, {}, 27 * 4)
@@ -874,6 +960,32 @@ H.case("le bedrock ne termine plus le chantier, il est contourné", function()
 	local restant = restants(3, 3, 3)
 	H.eq(restant, 2, "seul le bedrock subsiste")
 	H.eq(mock.getTurtle().z, 0, "revenue malgré l'obstacle")
+end)
+
+H.case("une rangee de bedrock suffit a conclure au fond", function()
+	-- Auparavant, il fallait une couche ENTIERE inatteignable : ici 64
+	-- cellules tentees une a une, chacune avec un detour.
+	terrain({ width = 8, depth = 8, height = 9 })
+	mock.fill(0, 0, -12, 7, 7, -3, { name = "minecraft:bedrock", unbreakable = true })
+
+	local sorties = run("8", "8", "9")
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier conclu")
+	local trace = mock.getFile("ccquarry.log")
+	H.contains(trace, "Fond atteint", "fond reconnu")
+	local _, tentees = trace:gsub("Inatteignable", "")
+	H.eq(tentees, 8, "une rangee tentee, pas toute la couche")
+	H.eq(mock.getTurtle().z, 0, "revenue a l'origine")
+end)
+
+H.case("quelques blocs de bedrock epars ne concluent pas au fond", function()
+	terrain({ width = 8, depth = 8, height = 3 })
+	for x = 0, 6, 2 do mock.setBlock(x, 3, -1, { name = "minecraft:bedrock", unbreakable = true }) end
+
+	run("8", "8", "3")
+	H.eq((mock.getFile("ccquarry.log")):find("Fond atteint", 1, true), nil, "pas de fond")
+	-- Chaque cellule sautee laisse son bedrock et le bloc sous lui.
+	H.eq(restants(8, 8, 3), 8, "seules les cellules de bedrock subsistent")
 end)
 
 H.case("le gravier qui retombe ne bloque pas le chantier", function()

@@ -659,6 +659,21 @@ local STATES = {}
 -- Défini plus bas, avec les autres fonctions de vidage.
 local serviceOnSite
 
+local BEDROCK = "minecraft:bedrock"
+
+--- Cellules de bedrock consécutives au-delà desquelles le fond est atteint.
+--
+-- Sans cette règle, seule une couche ENTIÈRE inatteignable concluait : sur un
+-- 16x16, 256 cellules tentées une à une, chacune avec un détour par le
+-- dessus. Or le bedrock n'a rien au-delà. Une rangée complète suffit : dans
+-- la couche de bedrock irrégulière, une rangée de 16 bedrocks d'affilée est
+-- rare (moins de 3 % à 80 % de bedrock, un millième à 60 %), et ce qu'on y
+-- perdrait se limite à quelques blocs au ras du fond. Au moins 8, pour qu'un
+-- chantier étroit ne s'arrête pas sur deux ou trois blocs malchanceux.
+local function bedrockFloor(job)
+	return math.min(ccPlan.perLayer(job), math.max(job.width, job.depth, 8))
+end
+
 STATES[S.CALIBRATE] = function()
 	-- Le GPS, s'il est disponible, rend la reprise fiable : la position suivie
 	-- peut être en retard d'un bloc après un reboot en plein mouvement.
@@ -710,6 +725,7 @@ STATES[S.GO_TO_WORK] = function()
 
 	if ok then
 		ctx.streak = 0
+		ctx.bedrock = 0
 		return S.MINING
 	end
 
@@ -718,6 +734,9 @@ STATES[S.GO_TO_WORK] = function()
 		-- que ce soit : c'est donc ici, et pas seulement dans needsService,
 		-- qu'il faut envisager de brûler ce qu'on transporte.
 		if refuelOnSite() then return S.GO_TO_WORK end
+		-- Puis le coffre portable, posé là où l'on est : la garde se
+		-- déclenche aussi en plein trajet, pas seulement au fond.
+		if serviceOnSite() then return S.GO_TO_WORK end
 		ctx.reason = "fuel"
 		return S.RETURN_HOME
 	end
@@ -726,10 +745,12 @@ STATES[S.GO_TO_WORK] = function()
 	-- L'ancienne version mettait done = true sur un unique mouvement raté.
 	ctx.skips = ctx.skips + 1
 	ctx.streak = ctx.streak + 1
+	ctx.bedrock = (block == BEDROCK) and (ctx.bedrock or 0) + 1 or 0
 	journal("Inatteignable : " .. tostring(block or reason))
 
-	if ctx.streak >= ccPlan.perLayer(ctx.job) then
-		-- Une couche entière inatteignable : c'est le fond.
+	if ctx.streak >= ccPlan.perLayer(ctx.job) or ctx.bedrock >= bedrockFloor(ctx.job) then
+		-- Une couche entière inatteignable, ou une rangée de bedrock : c'est
+		-- le fond.
 		journal("Fond atteint")
 		ctx.reason = "done"
 		return S.RETURN_HOME
@@ -877,18 +898,29 @@ end
 --- Vide l'inventaire dans le coffre portable déjà posé, ravitaille si
 --- demandé, puis reprend le coffre.
 -- @return true si le coffre a été repris
+--- Ravitaille depuis le conteneur visé, après avoir brûlé ce qu'on porte.
+--
+-- Retient si le conteneur contenait du combustible : un coffre qui ne reçoit
+-- que du butin n'en aura pas davantage au passage suivant, et le fouiller
+-- coûte une aspiration, un test et un dépôt par pile examinée.
+local function refuelFromContainer(where)
+	if ccFuel.level() >= CONFIG.fuelTopUp then return end
+	-- Le moins cher d abord : ce qu on transporte deja.
+	ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
+	if ccFuel.level() >= CONFIG.fuelTopUp then return end
+
+	local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
+	ctx.chestFuel = fine or why ~= "no_fuel_found"
+	if not fine then journal("Carburant : " .. tostring(why)) end
+end
+
 local function unloadIntoChest(where, refuel)
 	local ok, reason, slot = ccInv.unload(where, { trashWhere = trashAwayFrom(where), protect = protectedSlots() })
 	if not ok then
 		journal("Vidage : " .. tostring(reason) .. " (slot " .. tostring(slot) .. ")")
 	end
 
-	if refuel and ccFuel.level() < CONFIG.fuelTopUp then
-		-- Le moins cher d abord : ce qu on transporte deja.
-		ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
-		local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
-		if not fine then journal("Carburant : " .. tostring(why)) end
-	end
+	if refuel then refuelFromContainer(where) end
 
 	local taken, why = ccInv.takeChest(where)
 	if not taken then journal("Reprise du coffre : " .. tostring(why)) end
@@ -953,12 +985,7 @@ local function serviceUnload(refuel)
 
 		-- Le conteneur fixe sert aussi de source de carburant : c'est là qu'on
 		-- vient déposer du charbon pour la turtle.
-		if refuel and ccFuel.level() < CONFIG.fuelTopUp then
-			-- Le moins cher d abord : ce qu on transporte deja.
-			ccFuel.refuelFromInventory(CONFIG.fuelTopUp)
-			local fine, why = ccFuel.refuelFromChest(where, CONFIG.fuelTopUp)
-			if not fine then journal("Carburant : " .. tostring(why)) end
-		end
+		if refuel then refuelFromContainer(where) end
 		tidyInventory()
 		return "depot"
 	end
@@ -976,7 +1003,13 @@ local FUEL_CHEST_RETRY = 60   -- secondes entre deux fouilles du coffre
 local WAIT_MARK = "ccquarry_wait"
 
 STATES[S.SERVICE] = function()
-	if not serviceUnload(true) then
+	-- Le coffre n'est fouillé pour du carburant que s'il peut en contenir, ou
+	-- si la turtle en a réellement besoin. Auparavant, il l'était à CHAQUE
+	-- passage dès que le niveau était sous fuelTopUp, donc presque toujours :
+	-- avec un coffre qui ne reçoit que du butin, des dizaines d'opérations
+	-- pour rien. La première fouille d'une session tranche la question.
+	local refuel = ctx.reason == "fuel" or ctx.chestFuel ~= false or not fuelForWork()
+	if not serviceUnload(refuel) then
 		-- Aucun moyen de dépôt : on brûle ce qu'on a, on jette le rebut, et le
 		-- reste du service dépend d'un humain. Le butin, lui, reste à bord.
 		journal("Aucun conteneur a l'origine : le butin reste a bord")
