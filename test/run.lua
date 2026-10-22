@@ -31,6 +31,7 @@ local MODULES = {
 	"test_ccFarmer",
 	"test_ccStairs",
 	"test_needs",
+	"test_ccCapa",
 }
 
 local H = require("harness")

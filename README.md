@@ -17,6 +17,7 @@ le disque (`F:\Minecraft\scripts CC\*.lua`) sont désormais du legacy.
 | `ccFarm.lua` | turtle | Ferme à cultures : récolte et replantage |
 | `ccFarmer.lua` | turtle | Champ 9x9 autour d'un coffre central : cultures des mods (apprises en jeu), melons, citrouilles, riz ; dépôt, recharge, reprise après reboot |
 | `ccInventory.lua` | computer | Gestion d'inventaire en réseau : coffres, moniteurs, crafting |
+| `ccCapa.lua` | computer / turtle | Classe les capacitors Ender IO (loot compris) des coffres branchés et conseille la machine où chacun rend le plus |
 | `ccRemote.lua` | pocket | Interface de pilotage à distance des turtles via rednet |
 | `ccClock.lua` | computer | Horloge sur moniteur |
 | `ccDigiCode.lua` | computer | Digicode : signal redstone sur code correct |
