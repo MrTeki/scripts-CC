@@ -18,14 +18,88 @@
 --   Une valeur absente vaut le niveau de base du capacitor.
 --
 -- Usage : ccCapa [inventaire]   (sans argument : tous les inventaires)
+--         ccCapa update        (met à jour le script et ses APIs)
+--
+-- Écran : un onglet par famille de machines, un capacitor par ligne, du
+-- meilleur au moins bon. Tab ou <> : onglet, ^v : ligne, R : relire les
+-- coffres, Q : quitter. Clics et molette sur un écran avancé.
 
 ------------------------------------------------------------
 -- Configuration
 ------------------------------------------------------------
 local REPORT_FILE = "ccCapa.txt"
 local REFERENCE   = 3      -- niveau de l'Octadic, le meilleur capacitor craftable
+local SAME        = 0.02   -- écart relatif sous lequel on parle d'égalité
 
 local args = { ... }
+
+------------------------------------------------------------
+-- Amorce
+------------------------------------------------------------
+-- Voir ccQuarry : un seul point d'entrée en dur, l'URL du dépôt.
+
+local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
+
+-- Version du script, comparée à celle du manifeste par `update`. À incrémenter,
+-- ici ET dans manifest.lua, à chaque publication qui doit atteindre les ordinateurs.
+local VERSION = 1
+
+-- Version minimale de ccBoot : la première qui sait mettre à jour le script.
+local BOOT = 2
+
+local NEEDS = { ccUtil = 1, ccUi = 2 }
+
+local function fetchBoot()
+	if not http then
+		error("apis/ccBoot.lua manquant ou trop ancien, et HTTP indisponible.\n"
+			.. "Copier le dossier apis/ depuis " .. REPO, 0)
+	end
+	local res = http.get(REPO .. "apis/ccBoot.lua")
+	if not res then error("Telechargement de ccBoot impossible : " .. REPO, 0) end
+	local body = res.readAll()
+	res.close()
+	if not body or #body == 0 or not load(body, "@ccBoot") then
+		error("ccBoot telecharge illisible : " .. REPO, 0)
+	end
+	fs.makeDir("apis")
+	local f = fs.open("apis/ccBoot.lua", "w")
+	f.write(body)
+	f.close()
+	package.loaded.ccBoot = nil
+end
+
+local function boot()
+	package.path = "/apis/?.lua;apis/?.lua;" .. package.path
+	local found, existing = pcall(require, "ccBoot")
+	if not found or type(existing) ~= "table" or (existing._VERSION or 1) < BOOT then
+		fetchBoot()
+	end
+	local ok, result = require("ccBoot").ensure(REPO, NEEDS)
+	if not ok then error(result, 0) end
+end
+
+-- Chargé par les tests avec "--lib" : pas d'amorce, le lanceur de tests a
+-- déjà mis apis/ dans package.path.
+if args[1] ~= "--lib" then boot() end
+
+if args[1] == "update" then
+	local path = shell and shell.getRunningProgram and shell.getRunningProgram()
+	local ok, report = require("ccBoot").update(REPO, NEEDS,
+		{ name = "ccCapa", version = VERSION, path = path })
+	if not ok then error(report, 0) end
+
+	if report.boot then print("ccBoot mis a jour : v" .. report.boot) end
+	if report.script then
+		print("ccCapa mis a jour : v" .. report.script .. ", relancer pour l'utiliser")
+	end
+	if #report.apis > 0 then print("APIs installees : " .. table.concat(report.apis, ", ")) end
+	if not report.boot and not report.script and #report.apis == 0 then
+		print("Tout est deja a jour.")
+	end
+	return
+end
+
+local ccUi = require("ccUi")
 
 local M = {}
 
@@ -196,37 +270,72 @@ function M.scan(only)
 end
 
 ------------------------------------------------------------
--- Rapport
+-- Classement
 ------------------------------------------------------------
 
-local ROLE_TITLE = {
-	traitement = "Machines de traitement (vitesse)",
-	stirling   = "Stirling Generator",
+-- Un onglet par famille de machines, plus les capacitors illisibles.
+-- `cols` : colonnes de valeurs, en multiple d'un Basic Capacitor.
+M.TABS = {
+	{ key = "traitement", title = "Traitement", short = "Trait.",
+		cols = { { "Vitesse", "speed", "%.1f" }, { "Portee", "range", "%.1f" } },
+		ref = "Octadic x9 / x3",
+		full = "Machines de traitement (vitesse)" },
+	{ key = "stirling", title = "Stirling", short = "Stirl.",
+		cols = { { "Prod", "power", "%.1f" }, { "Comb.", "fuel", "%.2f" } },
+		ref = "Octadic x3 / x1.40",
+		full = "Stirling Generator" },
+	{ key = "autres", title = "Autres", short = "Autres",
+		cols = {},
+		ref = "Shift + survol en jeu",
+		full = "Non reconnus" },
 }
 
-local function fmt(x) return string.format("%.1f", x) end
-
-local function describe(e)
-	local s = e.result.stats
-	if e.result.role == "stirling" then
-		return "prod x" .. fmt(s.power) .. ", combustible x" .. fmt(s.fuel)
-	end
-	return "vitesse x" .. fmt(s.speed) .. ", obelisque x" .. fmt(s.range)
+--- Rang face à l'Octadic : "+" mieux, "=" autant, "-" moins bien.
+function M.mark(ratio)
+	if ratio > 1 + SAME then return "+" end
+	if ratio < 1 - SAME then return "-" end
+	return "="
 end
 
---- Classe les capacitors trouvés et renvoie les lignes du rapport.
-function M.report(found)
-	local groups, unknown = { traitement = {}, stirling = {} }, {}
+--- Range les capacitors trouvés par onglet, du meilleur au moins bon.
+function M.classify(found)
+	local groups = { traitement = {}, stirling = {}, autres = {} }
 	for _, e in ipairs(found) do
 		local info = M.parse(e.item, e.displayName)
 		if info then
 			e.result = M.assess(info)
 			table.insert(groups[e.result.role], e)
 		else
-			unknown[#unknown + 1] = e
+			e.result = nil
+			table.insert(groups.autres, e)
 		end
 	end
+	for _, role in ipairs({ "traitement", "stirling" }) do
+		table.sort(groups[role], function(a, b)
+			if a.result.ratio ~= b.result.ratio then return a.result.ratio > b.result.ratio end
+			return a.where < b.where
+		end)
+	end
+	return groups
+end
 
+local function fmt(x) return string.format("%.1f", x) end
+
+--- Nom affiché : sans le « Capacitor » final, commun à tous. S'il dépasse
+--- `width`, les mots longs sont abrégés (« Premium » -> « Prem. ») : couper
+--- la fin ferait perdre la base, qui compte autant que le bonus.
+local function shortName(e, width)
+	local name = (e.displayName or e.item):gsub(" Capacitor$", "")
+	local suffix = (e.count and e.count > 1) and (" x" .. e.count) or ""
+	if width and #name + #suffix > width then
+		name = name:gsub("(%a%a%a%a)%a%a+", "%1.")
+	end
+	return name .. suffix
+end
+
+--- Rapport texte, écrit dans REPORT_FILE.
+function M.report(found)
+	local groups = M.classify(found)
 	local lines = {}
 	local function out(s) lines[#lines + 1] = s or "" end
 
@@ -237,29 +346,28 @@ function M.report(found)
 	end
 
 	local weak = 0
-	for _, role in ipairs({ "traitement", "stirling" }) do
-		local list = groups[role]
-		table.sort(list, function(a, b) return a.result.ratio > b.result.ratio end)
+	for _, tab in ipairs(M.TABS) do
+		local list = groups[tab.key]
 		if #list > 0 then
-			out("== " .. ROLE_TITLE[role] .. " ==")
+			out("== " .. tab.full .. " ==")
 			for i, e in ipairs(list) do
-				local mark = e.result.ratio < 1 and " (< Octadic)" or ""
-				if e.result.ratio < 1 then weak = weak + e.count end
-				out(string.format("%d. %s%s", i, e.displayName,
+				local head = tab.key == "autres" and "-" or (i .. ".")
+				out(string.format("%s %s%s", head, e.displayName,
 					e.count > 1 and (" x" .. e.count) or ""))
-				out("   " .. describe(e) .. mark)
+				if e.result then
+					local s = e.result.stats
+					local mark = e.result.ratio < 1 - SAME and " (< Octadic)" or ""
+					if e.result.ratio < 1 - SAME then weak = weak + e.count end
+					if tab.key == "stirling" then
+						out("   prod x" .. fmt(s.power) .. ", combustible x" .. fmt(s.fuel) .. mark)
+					else
+						out("   vitesse x" .. fmt(s.speed) .. ", obelisque x" .. fmt(s.range) .. mark)
+					end
+				end
 				out("   " .. e.where)
 			end
 			out()
 		end
-	end
-
-	if #unknown > 0 then
-		out("== Non reconnus ==")
-		for _, e in ipairs(unknown) do
-			out(e.displayName .. "  " .. e.where)
-		end
-		out()
 	end
 
 	out("Gains par rapport a un Basic Capacitor.")
@@ -273,6 +381,193 @@ function M.report(found)
 	return lines
 end
 
+------------------------------------------------------------
+-- Écran
+------------------------------------------------------------
+-- Disposition, de haut en bas :
+--   1        bandeau : onglets, nombre de capacitors
+--   2        en-têtes de colonnes
+--   3..h-4   liste, une ligne par capacitor
+--   h-3      nom complet du capacitor choisi
+--   h-2      bandeau : son emplacement
+--   h-1      référence Octadic de l'onglet
+--   h        aide clavier
+
+local COL_W = 7     -- largeur d'une colonne de valeurs
+local MARK_COLOR = { ["+"] = "lime", ["="] = "yellow", ["-"] = "red" }
+
+--- État de l'écran : onglet courant, ligne choisie et décalage par onglet.
+function M.newView(groups)
+	return { groups = groups, tab = 1, sel = { 1, 1, 1 }, top = { 1, 1, 1 } }
+end
+
+local function currentList(v) return v.groups[M.TABS[v.tab].key] end
+
+local function listRows()
+	local _, h = ccUi.size()
+	return math.max(1, h - 6)
+end
+
+--- Garde la ligne choisie dans la liste et visible.
+local function clampView(v)
+	local n = #currentList(v)
+	local t = v.tab
+	v.sel[t] = math.max(1, math.min(v.sel[t], math.max(1, n)))
+	local rows = listRows()
+	if v.sel[t] < v.top[t] then v.top[t] = v.sel[t] end
+	if v.sel[t] > v.top[t] + rows - 1 then v.top[t] = v.sel[t] - rows + 1 end
+	v.top[t] = math.max(1, math.min(v.top[t], math.max(1, n - rows + 1)))
+end
+
+--- Position des onglets dans le bandeau : { { x1, x2, label }, ... }.
+-- Titre et libellés longs quand ils tiennent, sinon les courts.
+local function tabLayout(w, count)
+	local variants = { { true, "title" }, { false, "title" }, { false, "short" } }
+	for n, variant in ipairs(variants) do
+		local withName, field = variant[1], variant[2]
+		local x = withName and 9 or 1
+		local out = {}
+		for i, tab in ipairs(M.TABS) do
+			local label = " " .. tab[field] .. " "
+			out[i] = { x, x + #label - 1, label }
+			x = x + #label
+		end
+		if x - 1 + #count + 1 <= w or n == #variants then return out, withName end
+	end
+end
+
+local function pad(s, n) return #s >= n and s:sub(1, n) or s .. string.rep(" ", n - #s) end
+local function lpad(s, n) return #s >= n and s:sub(1, n) or string.rep(" ", n - #s) .. s end
+
+function M.draw(v)
+	clampView(v)
+	local w, h = ccUi.size()
+	local tab = M.TABS[v.tab]
+	local list = currentList(v)
+	local total = 0
+	for _, t in ipairs(M.TABS) do
+		for _, e in ipairs(v.groups[t.key]) do total = total + (e.count or 1) end
+	end
+
+	ccUi.frame(function()
+		ccUi.clear()
+
+		-- Bandeau des onglets
+		local count = total .. " capa "
+		local layout, withName = tabLayout(w, count)
+		v.layout = layout
+		ccUi.fill(1, colors.gray)
+		if withName then ccUi.write(1, 1, " ccCapa ", colors.orange, colors.gray) end
+		for i, pos in ipairs(layout) do
+			if i == v.tab then
+				ccUi.write(pos[1], 1, pos[3], colors.black, colors.white)
+			else
+				-- En noir et blanc, un fond gris passe en négatif : seul
+				-- l'onglet courant doit l'être, les autres restent sur noir.
+				ccUi.write(pos[1], 1, pos[3], colors.white, ccUi.isColor() and colors.gray or nil)
+			end
+		end
+		local last = layout[#layout][2]
+		if last + #count < w then
+			ccUi.write(w - #count + 1, 1, count, colors.white,
+				ccUi.isColor() and colors.gray or nil)
+		end
+
+		-- En-têtes. Sur un écran étroit (poche), une seule colonne de valeurs.
+		local cols = tab.cols
+		if w < 39 and #cols > 1 then cols = { cols[1] } end
+		local valuesW = #cols * COL_W
+		local nameW = math.max(4, w - 4 - valuesW - 2)
+		local head = "  # " .. pad(tab.key == "autres" and "Non reconnus" or "Capacitor", nameW)
+		for _, c in ipairs(cols) do head = head .. lpad(c[1], COL_W) end
+		ccUi.write(1, 2, pad(head, w), colors.lightGray)
+
+		-- Liste
+		local rows = listRows()
+		if #list == 0 then
+			ccUi.write(3, 4, tab.key == "autres" and "Rien a signaler." or "Aucun capacitor ici.",
+				colors.lightGray)
+		end
+		for r = 0, rows - 1 do
+			local i = v.top[v.tab] + r
+			local e = list[i]
+			if not e then break end
+			local y = 3 + r
+			local selected = i == v.sel[v.tab]
+			local rank = tab.key == "autres" and "  " or lpad(tostring(i), 2)
+			local left = (selected and ">" or " ") .. rank .. " " .. pad(shortName(e, nameW), nameW)
+			local values = ""
+			for _, c in ipairs(cols) do
+				values = values .. lpad(string.format(c[3], e.result.stats[c[2]]), COL_W)
+			end
+			local mark = e.result and M.mark(e.result.ratio) or " "
+			local right = values .. " " .. mark .. " "
+			if selected then
+				ccUi.write(1, y, pad(left .. right, w), colors.white, colors.blue)
+			else
+				ccUi.write(1, y, left)
+				ccUi.write(#left + 1, y, right, e.result and colors[MARK_COLOR[mark]] or nil)
+			end
+		end
+
+		-- Détail du capacitor choisi
+		local e = list[v.sel[v.tab]]
+		if e then
+			ccUi.write(1, h - 3, pad(" " .. (e.displayName or e.item), w), colors.white)
+			ccUi.banner(h - 2, "Emplacement : " .. e.where, nil, colors.gray)
+		else
+			ccUi.fill(h - 2, colors.gray)
+		end
+		local legend = tab.key == "autres" and "" or "  +:mieux -:moins"
+		ccUi.write(1, h - 1, pad(" " .. tab.ref .. legend, w), colors.lightGray)
+		ccUi.write(1, h, pad(" Tab:onglet ^v:ligne R:relire Q:quitter", w), colors.gray)
+	end)
+end
+
+--- Applique un événement. Renvoie "quit", "rescan" ou nil.
+function M.handle(v, event, p1, p2, p3)
+	local list = currentList(v)
+	local t = v.tab
+	if event == "terminate" then return "quit" end
+	if event == "char" then
+		local c = p1:lower()
+		if c == "q" then return "quit" end
+		if c == "r" then return "rescan" end
+	elseif event == "key" then
+		if p1 == keys.tab or p1 == keys.right then
+			v.tab = v.tab % #M.TABS + 1
+		elseif p1 == keys.left then
+			v.tab = (v.tab - 2) % #M.TABS + 1
+		elseif p1 == keys.up then
+			v.sel[t] = v.sel[t] - 1
+		elseif p1 == keys.down then
+			v.sel[t] = v.sel[t] + 1
+		elseif keys.pageUp and p1 == keys.pageUp then
+			v.sel[t] = v.sel[t] - listRows()
+		elseif keys.pageDown and p1 == keys.pageDown then
+			v.sel[t] = v.sel[t] + listRows()
+		elseif keys.home and p1 == keys.home then
+			v.sel[t] = 1
+		elseif keys["end"] and p1 == keys["end"] then
+			v.sel[t] = #list
+		end
+	elseif event == "mouse_scroll" then
+		v.sel[t] = v.sel[t] + p1
+	elseif event == "mouse_click" or event == "monitor_touch" then
+		local x, y = p2, p3
+		if y == 1 then
+			for i, pos in ipairs(v.layout or {}) do
+				if x >= pos[1] and x <= pos[2] then v.tab = i end
+			end
+		elseif y >= 3 and y < 3 + listRows() then
+			local i = v.top[t] + y - 3
+			if list[i] then v.sel[t] = i end
+		end
+	end
+	clampView(v)
+	return nil
+end
+
 if args[1] == "--lib" then return M end
 
 ------------------------------------------------------------
@@ -284,15 +579,35 @@ if args[1] and not peripheral.isPresent(args[1]) then
 	return
 end
 
-local lines = M.report(M.scan(args[1]))
-
-local f = fs.open(REPORT_FILE, "w")
-if f then
-	f.write(table.concat(lines, "\n") .. "\n")
-	f.close()
+local function scanAll()
+	local found = M.scan(args[1])
+	local f = fs.open(REPORT_FILE, "w")
+	if f then
+		f.write(table.concat(M.report(found), "\n") .. "\n")
+		f.close()
+	end
+	return found
 end
 
-term.clear()
-term.setCursorPos(1, 1)
-textutils.pagedPrint(table.concat(lines, "\n"))
+ccUi.reset()
+ccUi.buffered()
+
+local view = M.newView(M.classify(scanAll()))
+-- Ouvre sur le premier onglet qui a quelque chose à montrer.
+for i, tab in ipairs(M.TABS) do
+	if #view.groups[tab.key] > 0 then view.tab = i break end
+end
+
+while true do
+	M.draw(view)
+	local action = M.handle(view, os.pullEventRaw())
+	if action == "quit" then break end
+	if action == "rescan" then
+		local tab, sel, top = view.tab, view.sel, view.top
+		view = M.newView(M.classify(scanAll()))
+		view.tab, view.sel, view.top = tab, sel, top
+	end
+end
+
+ccUi.clear()
 print("Rapport complet : " .. REPORT_FILE)

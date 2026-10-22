@@ -111,3 +111,129 @@ H.case("ccCapa : scan des inventaires voisins", function()
 	H.eq(where["left:1"].displayName, "Good Hungry Capacitor", "loot")
 	H.eq(where["left:5"].count, 3, "octadic x3")
 end)
+
+-- ---------------------------------------------------------------------------
+-- Écran
+-- ---------------------------------------------------------------------------
+
+local mock = require("ccMock")
+local ccUi = require("ccUi")
+
+local SAMPLE = {
+	{ item = LOOT, displayName = "Nice Hungry Capacitor", count = 1, where = "chest:1" },
+	{ item = LOOT, displayName = "Premium Hungry Wonder Capacitor", count = 1, where = "chest:2" },
+	{ item = LOOT, displayName = "Premium Hot Wonder Capacitor", count = 2, where = "chest:3" },
+	{ item = "enderio:octadic_capacitor", displayName = "Octadic Capacitor", count = 1, where = "chest:4" },
+	{ item = LOOT, displayName = "Truc", count = 1, where = "chest:5" },
+}
+
+local function screen(w, h, colour)
+	mock.install()
+	mock.reset({ termWidth = w, termHeight = h })
+	mock.setColour(colour ~= false)
+	ccUi.reset()
+	local v = C.newView(C.classify(SAMPLE))
+	C.draw(v)
+	return v
+end
+
+local function lines(h)
+	local out = {}
+	for y = 1, h do out[y] = mock.screenLine(y) end
+	return out
+end
+
+H.case("ccCapa ecran : ordinateur 51x19, onglet Traitement", function()
+	screen(51, 19)
+	local L = lines(19)
+	H.contains(L[1], "ccCapa", "titre")
+	H.contains(L[1], "Traitement", "onglet")
+	H.contains(L[1], "6 capa", "total, quantites comprises")
+	H.contains(L[2], "Vitesse", "en-tete")
+	H.contains(L[3], ">", "premiere ligne choisie")
+	H.contains(L[3], "Premium Hungry Wonder", "meilleur en tete")
+	H.contains(L[3], "+", "mieux qu'un Octadic")
+	H.contains(L[4], "Octadic", "Octadic ensuite")
+	H.contains(L[4], "=", "egal a lui-meme")
+	H.contains(L[5], "-", "Nice Hungry moins bon")
+	H.contains(L[16], "Premium Hungry Wonder Capacitor", "nom complet")
+	H.contains(L[17], "chest:2", "emplacement")
+	H.contains(L[19], "Q:quitter", "aide")
+	for y, l in ipairs(L) do H.ok(#l <= 51, "ligne " .. y .. " trop longue") end
+end)
+
+H.case("ccCapa ecran : turtle 39x13, libelles courts sans debordement", function()
+	screen(39, 13)
+	local L = lines(13)
+	for y, l in ipairs(L) do H.ok(#l <= 39, "ligne " .. y .. " trop longue : " .. l) end
+	H.contains(L[1], "Stirl", "onglets raccourcis ou entiers")
+end)
+
+H.case("ccCapa ecran : poche 26x20 ne deborde pas", function()
+	screen(26, 20)
+	for y, l in ipairs(lines(20)) do H.ok(#l <= 26, "ligne " .. y .. " trop longue : " .. l) end
+end)
+
+H.case("ccCapa ecran : Tab passe au Stirling, fleches bougent la selection", function()
+	local v = screen(51, 19)
+	C.handle(v, "key", keys.down)
+	C.draw(v)
+	H.contains(mock.screenLine(17), "chest:4", "deuxieme ligne")
+	C.handle(v, "key", keys.up)
+	C.handle(v, "key", keys.up)
+	H.eq(v.sel[1], 1, "pas au-dessus de la premiere")
+	C.handle(v, "key", keys.tab)
+	C.draw(v)
+	H.contains(mock.screenLine(2), "Prod", "colonnes Stirling")
+	H.contains(mock.screenLine(3), "Premium Hot Wonder x2", "capacitor Hot")
+	C.handle(v, "key", keys.left)
+	H.eq(v.tab, 1, "retour a gauche")
+	C.handle(v, "key", keys.left)
+	H.eq(v.tab, 3, "boucle sur Autres")
+	C.draw(v)
+	H.contains(mock.screenLine(3), "Truc", "non reconnu liste")
+end)
+
+H.case("ccCapa ecran : clic sur un onglet et sur une ligne", function()
+	local v = screen(51, 19)
+	local pos = v.layout[2]
+	C.handle(v, "mouse_click", 1, pos[1], 1)
+	H.eq(v.tab, 2, "onglet Stirling clique")
+	C.handle(v, "mouse_click", 1, pos[1], 1)
+	C.handle(v, "key", keys.tab)
+	C.handle(v, "key", keys.tab)
+	C.handle(v, "mouse_click", 1, 5, 5)
+	H.eq(v.sel[1], 3, "troisieme ligne cliquee")
+	C.handle(v, "mouse_click", 1, 5, 12)
+	H.eq(v.sel[1], 3, "clic sous la liste ignore")
+end)
+
+H.case("ccCapa ecran : Q quitte, R relit, Ctrl+T quitte", function()
+	local v = screen(51, 19)
+	H.eq(C.handle(v, "char", "q"), "quit", "q")
+	H.eq(C.handle(v, "char", "R"), "rescan", "R")
+	H.eq(C.handle(v, "terminate"), "quit", "terminate")
+end)
+
+H.case("ccCapa ecran : liste plus longue que l'ecran defile", function()
+	mock.install()
+	mock.reset({ termWidth = 39, termHeight = 13 })
+	ccUi.reset()
+	local many = {}
+	for i = 1, 20 do
+		many[i] = { item = "enderio:octadic_capacitor", displayName = "Octadic Capacitor",
+			count = 1, where = string.format("chest:%02d", i) }
+	end
+	local v = C.newView(C.classify(many))
+	for _ = 1, 15 do C.handle(v, "key", keys.down) end
+	C.draw(v)
+	H.eq(v.sel[1], 16, "selection")
+	local rows = 13 - 6
+	H.eq(v.top[1], 16 - rows + 1, "fenetre suit la selection")
+	H.contains(mock.screenLine(2 + rows), ">16", "selection en bas de liste")
+end)
+
+H.case("ccCapa ecran : noir et blanc, la selection reste reperable", function()
+	screen(39, 13, false)
+	H.contains(mock.screenLine(3), ">", "marqueur de selection")
+end)

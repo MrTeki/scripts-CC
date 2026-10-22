@@ -9,7 +9,7 @@
 
 local H = require("harness")
 
-local SCRIPTS = { "ccQuarry.lua", "ccChopper.lua" }
+local SCRIPTS = { "ccQuarry.lua", "ccChopper.lua", "ccCapa.lua" }
 
 local function read(path)
 	local f = assert(io.open(path, "r"))

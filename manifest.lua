@@ -33,7 +33,7 @@ return {
 		ccFarm      = { path = "ccFarm.lua" },
 		ccFarmer    = { path = "ccFarmer.lua" },
 		ccInventory = { path = "ccInventory.lua" },
-		ccCapa      = { path = "ccCapa.lua" },
+		ccCapa      = { version = 1, path = "ccCapa.lua" },
 		ccRemote    = { path = "ccRemote.lua" },
 		ccClock     = { path = "ccClock.lua" },
 		ccDigiCode  = { path = "ccDigiCode.lua" },
