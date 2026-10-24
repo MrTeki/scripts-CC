@@ -139,6 +139,10 @@ local ccMenu = require("ccMenu")
 local SAVE_PATH = "ccquarry.save"
 local SAVE_VERSION = 1
 local LOG_PATH = "ccquarry.log"
+-- Au-delà, le journal passe en .old (l'ancien .old est effacé). Sans plafond,
+-- il remplissait le disque du turtle (1 Mo) au bout de quelques heures de
+-- chantier, et l'écriture suivante tuait le script sur « Out of space ».
+local LOG_MAX = 64 * 1024
 
 local CONFIG_PATH = "ccquarry.cfg"
 
@@ -333,10 +337,18 @@ local function journal(msg)
 	msg = tostring(msg)
 	pcall(ccUi.log, msg)
 
-	local handle = fs.open(LOG_PATH, "a")
-	if not handle then return end
-	handle.write(("[%.1f] %s | %s\n"):format(os.clock(), ctx.state or "?", msg))
-	handle.close()
+	-- Le journal est un confort : rien de ce qui l'empêche d'écrire (disque
+	-- plein compris) ne doit arrêter le chantier.
+	pcall(function()
+		if fs.exists(LOG_PATH) and fs.getSize(LOG_PATH) > LOG_MAX then
+			fs.delete(LOG_PATH .. ".old")
+			fs.move(LOG_PATH, LOG_PATH .. ".old")
+		end
+		local handle = fs.open(LOG_PATH, "a")
+		if not handle then return end
+		pcall(handle.write, ("[%.1f] %s | %s\n"):format(os.clock(), ctx.state or "?", msg))
+		handle.close()
+	end)
 end
 
 --- Attend un événement, en traitant Ctrl+T comme une demande d'arrêt propre.

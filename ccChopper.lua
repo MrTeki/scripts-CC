@@ -127,6 +127,9 @@ local ccConfig = require("ccConfig")
 local SAVE_PATH = "ccchop.save"       -- même nom qu'avant : les anciennes
 local SAVE_VERSION = 1                -- sauvegardes sont migrées, pas ignorées
 local LOG_PATH = "ccchop.log"
+-- Au-delà, le journal passe en .old (l'ancien .old est effacé) : sans plafond,
+-- il finissait par remplir le disque du turtle et tuer le script.
+local LOG_MAX = 64 * 1024
 local CONFIG_PATH = "ccchopper.cfg"
 
 local DEFAULTS = {
@@ -311,10 +314,18 @@ local function journal(msg, level)
 	msg = tostring(msg)
 	if level ~= "file" then pcall(ccUi.log, msg, level) end
 
-	local handle = fs.open(LOG_PATH, "a")
-	if not handle then return end
-	handle.write(("[%.1f] %s | %s\n"):format(os.clock(), ctx.state or "?", msg))
-	handle.close()
+	-- Le journal est un confort : rien de ce qui l'empêche d'écrire (disque
+	-- plein compris) ne doit arrêter le travail.
+	pcall(function()
+		if fs.exists(LOG_PATH) and fs.getSize(LOG_PATH) > LOG_MAX then
+			fs.delete(LOG_PATH .. ".old")
+			fs.move(LOG_PATH, LOG_PATH .. ".old")
+		end
+		local handle = fs.open(LOG_PATH, "a")
+		if not handle then return end
+		pcall(handle.write, ("[%.1f] %s | %s\n"):format(os.clock(), ctx.state or "?", msg))
+		handle.close()
+	end)
 end
 
 --- Attend un événement, en traitant Ctrl+T comme une demande d'arrêt propre.

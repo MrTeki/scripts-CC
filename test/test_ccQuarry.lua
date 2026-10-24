@@ -304,6 +304,34 @@ H.case("le journal enregistre l'etat terminal, pas une fausse erreur", function(
 	H.eq(trace:find("Etat inconnu", 1, true), nil, "aucun état inconnu")
 end)
 
+H.case("le journal tourne au lieu de remplir le disque", function()
+	-- Signalé en jeu : « ccQuarry:338: Out of space » après ~11 000 cellules.
+	-- Le journal grossissait sans limite jusqu'à remplir le disque du turtle.
+	terrain({ width = 2, depth = 2, height = 3 })
+	mock.putFile("ccquarry.log", ("x"):rep(70 * 1024))
+	run("2", "2", "3")
+
+	H.ok(#mock.getFile("ccquarry.log.old") >= 70 * 1024, "l'ancien journal est mis de côté")
+	H.ok(#mock.getFile("ccquarry.log") < 64 * 1024, "le nouveau repart de zéro")
+	H.contains(mock.getFile("ccquarry.log"), "Chantier termine", "et continue d'être alimenté")
+end)
+
+H.case("un disque plein n'arrête pas le chantier", function()
+	terrain({ width = 2, depth = 2, height = 3 })
+	local vraiOpen = fs.open
+	fs.open = function(path, mode)
+		if path == "ccquarry.log" then
+			return { write = function() error("Out of space", 0) end, close = function() end }
+		end
+		return vraiOpen(path, mode)
+	end
+	local ok, err = pcall(run, "2", "2", "3")
+	fs.open = vraiOpen
+	if not ok then error(err, 0) end
+
+	H.eq(restants(2, 2, 3), 0, "tout le volume est creusé")
+end)
+
 --- Chantier ou chaque colonne donne un bloc DIFFERENT : l'inventaire se
 --- remplit vraiment, au lieu que tout s'empile en trois slots.
 local function terrainVarie(w, d, h)
