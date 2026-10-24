@@ -27,8 +27,8 @@ return {
 	-- `version` : celle que déclare le script (`local VERSION = n`).
 	-- `<script> update` le réinstalle quand celle du dépôt est plus récente.
 	scripts = {
-		ccQuarry    = { version = 2, path = "ccQuarry.lua" },
-		ccChopper   = { version = 2, path = "ccChopper.lua" },
+		ccQuarry    = { version = 3, path = "ccQuarry.lua" },
+		ccChopper   = { version = 3, path = "ccChopper.lua" },
 		ccStairs    = { path = "ccStairs.lua" },
 		ccFarm      = { path = "ccFarm.lua" },
 		ccFarmer    = { path = "ccFarmer.lua" },

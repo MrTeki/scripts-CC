@@ -42,7 +42,7 @@ local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
 -- Version du script, comparée à celle du manifeste par `update`. À incrémenter,
 -- ici ET dans manifest.lua, à chaque publication qui doit atteindre les turtles.
-local VERSION = 2
+local VERSION = 3
 
 -- Version minimale de ccBoot : la première qui sait mettre à jour le script.
 local BOOT = 2
