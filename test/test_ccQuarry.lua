@@ -332,6 +332,49 @@ H.case("un disque plein n'arrête pas le chantier", function()
 	H.eq(restants(2, 2, 3), 0, "tout le volume est creusé")
 end)
 
+--- Lance le chantier avec un disque qui refuse toute sauvegarde après
+--- `budget` réussites, sauf si `libere` (un chemin) a été effacé entre-temps.
+local function sousDisquePlein(budget, libere)
+	local vraiOpen = fs.open
+	local n = 0
+	fs.open = function(path, mode)
+		if path == "ccquarry.save.tmp" and mode == "w" then
+			n = n + 1
+			if n > budget and not (libere and not fs.exists(libere)) then
+				return nil, "Out of space"
+			end
+		end
+		return vraiOpen(path, mode)
+	end
+	local ok, sorties = pcall(run, "3", "3", "6")
+	fs.open = vraiOpen
+	if not ok then error(sorties, 0) end
+	return sorties
+end
+
+H.case("disque plein : la turtle s'arrête au premier échec de sauvegarde", function()
+	-- Signalé en jeu : les sauvegardes échouaient sans bruit, la turtle
+	-- continuait, et la reprise est repartie 18 pas en arrière.
+	terrain({ width = 3, depth = 3, height = 6 })
+	local sorties = sousDisquePlein(10)
+	local t = mock.getTurtle()
+	local enregistre = textutils.unserialize(mock.getFile("ccquarry.save")).data.pos
+
+	H.contains(table.concat(sorties, "\n"), "Sauvegarde impossible", "cause affichée")
+	H.ok(math.abs(t.x - enregistre.x) + math.abs(t.y - enregistre.y)
+		+ math.abs(t.z - enregistre.z) <= 1, "au plus un pas d'écart avec la sauvegarde")
+	H.ok(restants(3, 3, 6) > 0, "le chantier n'a pas continué")
+end)
+
+H.case("disque plein : effacer les journaux suffit à continuer", function()
+	terrain({ width = 3, depth = 3, height = 6 })
+	mock.putFile("ccquarry.log.old", "ancien journal")
+	local sorties = sousDisquePlein(10, "ccquarry.log.old")
+
+	H.contains(table.concat(sorties, "\n"), "Carriere terminee", "chantier mené à terme")
+	H.eq(fs.exists("ccquarry.log.old"), false, "le vieux journal a été sacrifié")
+end)
+
 --- Chantier ou chaque colonne donne un bloc DIFFERENT : l'inventaire se
 --- remplit vraiment, au lieu que tout s'empile en trois slots.
 local function terrainVarie(w, d, h)

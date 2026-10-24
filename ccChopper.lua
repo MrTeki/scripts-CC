@@ -42,7 +42,7 @@ local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
 -- Version du script, comparée à celle du manifeste par `update`. À incrémenter,
 -- ici ET dans manifest.lua, à chaque publication qui doit atteindre les turtles.
-local VERSION = 3
+local VERSION = 4
 
 -- Version minimale de ccBoot : la première qui sait mettre à jour le script.
 local BOOT = 2
@@ -393,15 +393,32 @@ local MIGRATIONS = {
 	end,
 }
 
+--- Sauvegarde l'état, et LÈVE une erreur si c'est impossible.
+--
+-- Une sauvegarde qui échoue sans bruit fige la position enregistrée pendant
+-- que la turtle continue : à la reprise, elle se croit ailleurs. L'erreur
+-- remonte jusqu'à la machine, qui passe en ERREUR. Les journaux, seuls
+-- fichiers qui grossissent, sont sacrifiés avant d'en arriver là.
 local function save()
-	store.write({
+	local data = {
 		state = ctx.state,
 		reason = ctx.reason,
 		trees = ctx.trees,
 		target = ctx.target,
 		stats = ctx.stats,
 		pos = ccNav.position(),
-	})
+	}
+	local ok, why = store.write(data)
+	if ok then return end
+	for _, path in ipairs({ LOG_PATH .. ".old", LOG_PATH }) do
+		if fs.exists(path) then
+			fs.delete(path)
+			ok, why = store.write(data)
+			if ok then return end
+		end
+	end
+	error("Sauvegarde impossible (" .. tostring(why) .. "). Disque plein ? "
+		.. "La position enregistree peut avoir un pas de retard.", 0)
 end
 
 -- ---------------------------------------------------------------------------
@@ -2073,7 +2090,12 @@ local function machine()
 			-- Fichier seulement : le bandeau montre déjà l'état, et ces
 			-- lignes chassaient de l'écran les messages utiles.
 			journal(ctx.state, "file")
-			save()
+			local saved, err = pcall(save)
+			if not saved then
+				ctx.error = tostring(err)
+				journal(ctx.error, "error")
+				ctx.state = S.FAILED
+			end
 		end
 		draw()
 	end
@@ -2119,15 +2141,21 @@ journal(("Rasage sous %d saplings, charbon : %s")
 	:format(CONFIG.saplingReserve,
 	        CONFIG.makeCharcoal and "oui" or "non"))
 
-save()
+-- Pas un pas sans sauvegarde possible : la turtle n'a pas encore bougé.
+local startSaved, startErr = pcall(save)
+if not startSaved then
+	ccUi.clear()
+	print(startErr)
+	return
+end
 
 parallel.waitForAny(machine, events)
 
 ccUi.clear()
 if ctx.interrupted then
-	save()
+	local saved, err = pcall(save)
 	journal("Interrompu par Ctrl+T")
-	print("Interrompu. Le travail est sauvegarde.")
+	print(saved and "Interrompu. Le travail est sauvegarde." or ("Interrompu. " .. tostring(err)))
 	print("")
 	print("  edit " .. CONFIG_PATH .. "   modifier les options")
 	print("  ccChopper           reprendre")

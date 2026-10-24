@@ -53,7 +53,7 @@ local REPO = "https://raw.githubusercontent.com/MrTeki/scripts-CC/main/"
 
 -- Version du script, comparée à celle du manifeste par `update`. À incrémenter,
 -- ici ET dans manifest.lua, à chaque publication qui doit atteindre les turtles.
-local VERSION = 3
+local VERSION = 4
 
 -- Version minimale de ccBoot : la première qui sait mettre à jour le script.
 local BOOT = 2
@@ -431,9 +431,17 @@ local MIGRATIONS = {
 	end,
 }
 
+--- Sauvegarde l'état, et LÈVE une erreur si c'est impossible.
+--
+-- Signalé en jeu : disque plein, chaque sauvegarde échouait sans bruit et la
+-- turtle continuait. La position enregistrée s'est figée 18 pas en arrière ;
+-- à la reprise, tout le chantier était décalé d'autant. Mieux vaut s'arrêter
+-- au premier échec : l'erreur remonte jusqu'à la machine, qui passe en ERREUR.
+-- Les journaux, seuls fichiers qui grossissent, sont sacrifiés avant d'en
+-- arriver là.
 local function save()
 	if not ctx.job then return end
-	store.write({
+	local data = {
 		job = ctx.job,
 		index = ctx.index,
 		state = ctx.state,
@@ -442,7 +450,18 @@ local function save()
 		skips = ctx.skips,
 		options = ctx.options,
 		pos = ccNav.position(),
-	})
+	}
+	local ok, why = store.write(data)
+	if ok then return end
+	for _, path in ipairs({ LOG_PATH .. ".old", LOG_PATH }) do
+		if fs.exists(path) then
+			fs.delete(path)
+			ok, why = store.write(data)
+			if ok then return end
+		end
+	end
+	error("Sauvegarde impossible (" .. tostring(why) .. "). Disque plein ? "
+		.. "La position enregistree peut avoir un pas de retard.", 0)
 end
 
 -- ---------------------------------------------------------------------------
@@ -1564,7 +1583,12 @@ local function machine()
 		-- supprimer le fichier, la réécrire le ressusciterait.
 		if ctx.state ~= before and ctx.state ~= S.DONE and ctx.state ~= S.FAILED then
 			journal(ctx.state)
-			save()
+			local saved, err = pcall(save)
+			if not saved then
+				ctx.error = tostring(err)
+				journal(ctx.error)
+				ctx.state = S.FAILED
+			end
 		end
 		draw()
 	end
@@ -1633,15 +1657,21 @@ end
 -- indication de l'identifiant qu'il aurait fallu accepter.
 journalInventory()
 
-save()
+-- Pas un pas sans sauvegarde possible : la turtle n'a pas encore bougé.
+local startSaved, startErr = pcall(save)
+if not startSaved then
+	ccUi.clear()
+	print(startErr)
+	return
+end
 
 parallel.waitForAny(machine, events)
 
 ccUi.clear()
 if ctx.interrupted then
-	save()
+	local saved, err = pcall(save)
 	journal("Interrompu par Ctrl+T")
-	print("Interrompu. Le chantier est sauvegarde.")
+	print(saved and "Interrompu. Le chantier est sauvegarde." or ("Interrompu. " .. tostring(err)))
 	print("")
 	print("  edit " .. CONFIG_PATH .. "   modifier les options")
 	print("  ccQuarry            reprendre")
